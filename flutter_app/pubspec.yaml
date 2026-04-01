@@ -1,0 +1,57 @@
+name: paintmatch
+description: AI-powered paint color recommendation app
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Navigation
+  go_router: ^13.2.0
+
+  # Supabase auth + DB
+  supabase_flutter: ^2.5.0
+
+  # Image picker (camera + gallery)
+  image_picker: ^1.1.2
+
+  # Secure storage for session
+  flutter_secure_storage: ^9.2.2
+
+  # HTTP
+  http: ^1.2.1
+
+  # Before/after slider
+  before_after: ^2.0.1
+
+  # Shimmer loading effect
+  shimmer: ^3.0.0
+
+  # Cached network images
+  cached_network_image: ^3.3.1
+
+  # URL launcher (affiliate links)
+  url_launcher: ^6.2.6
+
+  # Share (PNG export)
+  share_plus: ^9.0.0
+
+  # Path provider (temp files)
+  path_provider: ^2.1.3
+
+  # Icons
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
