@@ -86,9 +86,9 @@ def render_room():
     try:
         client = _get_replicate()
 
-        # Start async prediction
-        prediction = client.predictions.create(
-            version="stability-ai/stable-diffusion-inpainting:95b7223104132402a9ae91cc677285bc5eb997834bd2349fa486f53910fd68b3",
+        # Use run() — handles model versioning automatically
+        output = client.run(
+            "stability-ai/stable-diffusion-inpainting",
             input={
                 "prompt": prompt,
                 "negative_prompt": "blurry, low quality, distorted, unrealistic",
@@ -96,23 +96,10 @@ def render_room():
                 "mask": mask_uri,
                 "num_inference_steps": 25,
                 "guidance_scale": 7.5,
-                "scheduler": "DPMSolverMultistep",
             },
         )
 
-        # Poll until complete
-        for _ in range(MAX_POLLS):
-            prediction = client.predictions.get(prediction.id)
-            if prediction.status == "succeeded":
-                break
-            if prediction.status in {"failed", "canceled"}:
-                detail = getattr(prediction, 'error', None) or prediction.status
-                return jsonify({"data": None, "error": f"Replicate job failed: {detail}"}), 502
-            time.sleep(POLL_INTERVAL)
-        else:
-            return jsonify({"data": None, "error": "Replicate job timed out"}), 504
-
-        output_url = prediction.output[0] if isinstance(prediction.output, list) else prediction.output
+        output_url = output[0] if isinstance(output, list) else output
 
         # Download rendered image and cache in Supabase Storage
         rendered_bytes = requests.get(output_url, timeout=30).content
