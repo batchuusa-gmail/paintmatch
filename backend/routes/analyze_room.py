@@ -5,9 +5,11 @@ Accepts a room image, sends to Claude vision, returns structured palette JSON.
 import base64
 import os
 import json
+import io
 
 import anthropic
 from flask import Blueprint, request, jsonify
+from PIL import Image
 
 analyze_room_bp = Blueprint("analyze_room", __name__)
 
@@ -57,17 +59,18 @@ def analyze_room():
 
     raw_bytes = image_file.read()
 
-    # Detect real mime type from magic bytes, ignoring Content-Type header
-    if raw_bytes[:3] == b'\xff\xd8\xff':
-        mime_type = "image/jpeg"
-    elif raw_bytes[:8] == b'\x89PNG\r\n\x1a\n':
-        mime_type = "image/png"
-    elif raw_bytes[:4] == b'RIFF' and raw_bytes[8:12] == b'WEBP':
-        mime_type = "image/webp"
-    else:
-        # Default to JPEG — Anthropic handles it best
-        mime_type = "image/jpeg"
+    # Convert any format (HEIC, BMP, TIFF, etc.) to JPEG using Pillow
+    try:
+        img = Image.open(io.BytesIO(raw_bytes))
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        raw_bytes = buf.getvalue()
+    except Exception as e:
+        return jsonify({"data": None, "error": f"Could not read image: {e}"}), 400
 
+    mime_type = "image/jpeg"
     image_data = base64.standard_b64encode(raw_bytes).decode("utf-8")
 
     try:
