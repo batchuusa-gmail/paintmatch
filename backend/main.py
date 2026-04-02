@@ -12,7 +12,7 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024  # 10MB max upload
+app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024  # 20MB max upload
 
 # ---------------------------------------------------------------------------
 # Blueprints — add new ones here, never remove

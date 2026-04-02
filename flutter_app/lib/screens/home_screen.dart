@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
@@ -10,9 +11,9 @@ class HomeScreen extends StatelessWidget {
     final picker = ImagePicker();
     final picked = await picker.pickImage(
       source: source,
-      maxWidth: 1920,
-      maxHeight: 1920,
-      imageQuality: 90,
+      maxWidth: 1024,
+      maxHeight: 1024,
+      imageQuality: 75,
     );
     if (picked == null || !context.mounted) return;
     context.push('/loading', extra: File(picked.path));
@@ -88,14 +89,15 @@ class HomeScreen extends StatelessWidget {
               ),
               const SizedBox(height: 16),
 
-              // Secondary CTA: Camera
-              _UploadCard(
-                icon: Icons.camera_alt_outlined,
-                title: 'Take a Photo',
-                subtitle: 'Use your camera',
-                color: Theme.of(context).colorScheme.secondaryContainer,
-                onTap: () => _pickImage(context, ImageSource.camera),
-              ),
+              // Secondary CTA: Camera (mobile only)
+              if (!kIsWeb && (Platform.isIOS || Platform.isAndroid))
+                _UploadCard(
+                  icon: Icons.camera_alt_outlined,
+                  title: 'Take a Photo',
+                  subtitle: 'Use your camera',
+                  color: Theme.of(context).colorScheme.secondaryContainer,
+                  onTap: () => _pickImage(context, ImageSource.camera),
+                ),
 
               const SizedBox(height: 32),
               const Divider(),
