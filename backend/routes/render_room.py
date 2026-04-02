@@ -99,9 +99,9 @@ def render_room():
     try:
         client = _get_replicate()
 
-        # Use run() — handles model versioning automatically
+        # Use pinned version hash
         output = client.run(
-            "stability-ai/stable-diffusion-inpainting",
+            "stability-ai/stable-diffusion-inpainting:95b7223104132402a9ae91cc677285bc5eb997834bd2349fa486f53910fd68b3",
             input={
                 "prompt": prompt,
                 "negative_prompt": "blurry, low quality, distorted, unrealistic",
@@ -112,7 +112,7 @@ def render_room():
             },
         )
 
-        output_url = output[0] if isinstance(output, list) else output
+        output_url = output[0] if isinstance(output, list) else str(output)
 
         # Download rendered image and cache in Supabase Storage
         rendered_bytes = requests.get(output_url, timeout=30).content
