@@ -17,7 +17,12 @@ _replicate_client = None
 def _get_replicate():
     global _replicate_client
     if _replicate_client is None:
-        token = (os.environ.get("REPLICATE_API_TOKEN") or os.environ.get("REPLICATE_API_KEY", "")).strip()
+        token = (
+            os.environ.get("REPLICATE_API_TOKEN") or
+            os.environ.get("REPLICATE_API_KEY") or ""
+        ).strip()
+        # Also set env var so the SDK can find it internally
+        os.environ["REPLICATE_API_TOKEN"] = token
         _replicate_client = replicate.Client(api_token=token)
     return _replicate_client
 
@@ -55,6 +60,14 @@ def _upload_to_supabase(image_bytes: bytes, filename: str) -> str:
     )
     return sb.storage.from_(BUCKET).get_public_url(filename)
 
+
+@render_room_bp.route("/render-room/debug-env", methods=["GET"])
+def debug_env():
+    token = (os.environ.get("REPLICATE_API_TOKEN") or os.environ.get("REPLICATE_API_KEY") or "").strip()
+    return {"REPLICATE_API_TOKEN_set": bool(os.environ.get("REPLICATE_API_TOKEN")),
+            "REPLICATE_API_KEY_set": bool(os.environ.get("REPLICATE_API_KEY")),
+            "token_length": len(token),
+            "token_prefix": token[:5] if token else ""}
 
 @render_room_bp.route("/render-room", methods=["POST"])
 def render_room():
