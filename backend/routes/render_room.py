@@ -91,10 +91,12 @@ def render_room():
             version="stability-ai/stable-diffusion-inpainting:95b7223104132402a9ae91cc677285bc5eb997834bd2349fa486f53910fd68b3",
             input={
                 "prompt": prompt,
+                "negative_prompt": "blurry, low quality, distorted, unrealistic",
                 "image": image_uri,
                 "mask": mask_uri,
-                "num_inference_steps": 30,
+                "num_inference_steps": 25,
                 "guidance_scale": 7.5,
+                "scheduler": "DPMSolverMultistep",
             },
         )
 
@@ -104,7 +106,8 @@ def render_room():
             if prediction.status == "succeeded":
                 break
             if prediction.status in {"failed", "canceled"}:
-                return jsonify({"data": None, "error": f"Replicate job {prediction.status}"}), 502
+                detail = getattr(prediction, 'error', None) or prediction.status
+                return jsonify({"data": None, "error": f"Replicate job failed: {detail}"}), 502
             time.sleep(POLL_INTERVAL)
         else:
             return jsonify({"data": None, "error": "Replicate job timed out"}), 504
