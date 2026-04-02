@@ -12,6 +12,9 @@ import replicate
 import requests
 from flask import Blueprint, request, jsonify
 
+# Replicate SDK reads REPLICATE_API_TOKEN — set it explicitly from our env var
+os.environ.setdefault("REPLICATE_API_TOKEN", os.environ.get("REPLICATE_API_KEY", ""))
+
 from utils.supabase_client import get_supabase
 from utils.color_utils import is_valid_hex
 
