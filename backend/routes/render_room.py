@@ -12,8 +12,14 @@ import replicate
 import requests
 from flask import Blueprint, request, jsonify
 
-# Replicate SDK reads REPLICATE_API_TOKEN — set it explicitly from our env var
-os.environ.setdefault("REPLICATE_API_TOKEN", os.environ.get("REPLICATE_API_KEY", ""))
+_replicate_client = None
+
+def _get_replicate():
+    global _replicate_client
+    if _replicate_client is None:
+        token = (os.environ.get("REPLICATE_API_TOKEN") or os.environ.get("REPLICATE_API_KEY", "")).strip()
+        _replicate_client = replicate.Client(api_token=token)
+    return _replicate_client
 
 from utils.supabase_client import get_supabase
 from utils.color_utils import is_valid_hex
@@ -78,8 +84,10 @@ def render_room():
     prompt = _hex_to_prompt(target_hex, finish)
 
     try:
+        client = _get_replicate()
+
         # Start async prediction
-        prediction = replicate.predictions.create(
+        prediction = client.predictions.create(
             version="stability-ai/stable-diffusion-inpainting:95b7223104132402a9ae91cc677285bc5eb997834bd2349fa486f53910fd68b3",
             input={
                 "prompt": prompt,
@@ -92,7 +100,7 @@ def render_room():
 
         # Poll until complete
         for _ in range(MAX_POLLS):
-            prediction = replicate.predictions.get(prediction.id)
+            prediction = client.predictions.get(prediction.id)
             if prediction.status == "succeeded":
                 break
             if prediction.status in {"failed", "canceled"}:
