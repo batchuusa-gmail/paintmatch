@@ -20,17 +20,25 @@ class ApiService {
   Future<RoomAnalysis> analyzeRoom(File imageFile) async {
     final uri = Uri.parse('$_base/analyze-room');
     final request = http.MultipartRequest('POST', uri);
-    final mimeType = _mimeType(imageFile.path);
-    request.files.add(await http.MultipartFile.fromPath(
+
+    // Always send as JPEG — reads raw bytes and forces image/jpeg content type
+    // This handles HEIC, HEIF, and other macOS-native formats
+    final bytes = await imageFile.readAsBytes();
+    request.files.add(http.MultipartFile.fromBytes(
       'image',
-      imageFile.path,
-      contentType: MediaType.parse(mimeType),
+      bytes,
+      filename: 'room.jpg',
+      contentType: MediaType.parse('image/jpeg'),
     ));
 
     final streamed = await request.send();
     final body = await http.Response.fromStream(streamed);
-    final json = jsonDecode(body.body) as Map<String, dynamic>;
 
+    if (body.statusCode != 200) {
+      throw Exception('Server error ${body.statusCode}: ${body.body}');
+    }
+
+    final json = jsonDecode(body.body) as Map<String, dynamic>;
     if (json['error'] != null) throw Exception(json['error']);
     return RoomAnalysis.fromJson(json['data'] as Map<String, dynamic>);
   }

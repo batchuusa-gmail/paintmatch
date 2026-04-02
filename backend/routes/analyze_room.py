@@ -55,11 +55,20 @@ def analyze_room():
     if image_file.filename == "":
         return jsonify({"data": None, "error": "Empty filename"}), 400
 
-    mime_type = image_file.content_type or "image/jpeg"
-    if mime_type not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
-        return jsonify({"data": None, "error": f"Unsupported image type: {mime_type}"}), 400
+    raw_bytes = image_file.read()
 
-    image_data = base64.standard_b64encode(image_file.read()).decode("utf-8")
+    # Detect real mime type from magic bytes, ignoring Content-Type header
+    if raw_bytes[:3] == b'\xff\xd8\xff':
+        mime_type = "image/jpeg"
+    elif raw_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+        mime_type = "image/png"
+    elif raw_bytes[:4] == b'RIFF' and raw_bytes[8:12] == b'WEBP':
+        mime_type = "image/webp"
+    else:
+        # Default to JPEG — Anthropic handles it best
+        mime_type = "image/jpeg"
+
+    image_data = base64.standard_b64encode(raw_bytes).decode("utf-8")
 
     try:
         client = _get_client()
