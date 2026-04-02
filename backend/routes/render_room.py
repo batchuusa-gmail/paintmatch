@@ -114,10 +114,13 @@ def render_room():
 
         output_url = output[0] if isinstance(output, list) else str(output)
 
-        # Download rendered image and cache in Supabase Storage
-        rendered_bytes = requests.get(output_url, timeout=30).content
-        filename = f"{uuid.uuid4()}.png"
-        cached_url = _upload_to_supabase(rendered_bytes, filename)
+        # Try to cache in Supabase Storage, fall back to Replicate URL
+        try:
+            rendered_bytes = requests.get(output_url, timeout=30).content
+            filename = f"{uuid.uuid4()}.png"
+            cached_url = _upload_to_supabase(rendered_bytes, filename)
+        except Exception:
+            cached_url = output_url  # use Replicate URL directly
 
         return jsonify({
             "data": {
