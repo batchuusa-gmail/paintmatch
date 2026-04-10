@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'config/app_config.dart';
+import 'config/app_theme.dart';
 import 'screens/auth/auth_wrapper.dart';
 import 'screens/auth/login_screen.dart';
 import 'screens/auth/signup_screen.dart';
@@ -45,6 +46,7 @@ final GoRouter _router = GoRouter(
         renderedImageUrl: args['renderedImageUrl'],
         selectedHex: args['selectedHex'],
         selectedColorName: args['selectedColorName'],
+        imageFile: args['imageFile'],
       );
     }),
     GoRoute(path: '/projects', builder: (_, __) => const AuthWrapper(
@@ -63,18 +65,7 @@ class PaintMatchApp extends StatelessWidget {
     return MaterialApp.router(
       title: 'PaintMatch',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF4A7C59),
-          brightness: Brightness.light,
-        ),
-        useMaterial3: true,
-        fontFamily: 'SF Pro Display',
-        appBarTheme: const AppBarTheme(
-          centerTitle: true,
-          elevation: 0,
-        ),
-      ),
+      theme: AppTheme.dark,
       routerConfig: _router,
     );
   }

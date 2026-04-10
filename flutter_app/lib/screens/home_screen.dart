@@ -2,7 +2,10 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
+
+import '../config/app_theme.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -11,9 +14,9 @@ class HomeScreen extends StatelessWidget {
     final picker = ImagePicker();
     final picked = await picker.pickImage(
       source: source,
-      maxWidth: 1024,
-      maxHeight: 1024,
-      imageQuality: 75,
+      maxWidth: 768,
+      maxHeight: 768,
+      imageQuality: 70,
     );
     if (picked == null || !context.mounted) return;
     context.push('/loading', extra: File(picked.path));
@@ -22,159 +25,258 @@ class HomeScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 28,
-              height: 28,
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.primary,
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: const Icon(Icons.format_paint, color: Colors.white, size: 18),
-            ),
-            const SizedBox(width: 8),
-            const Text('PaintMatch', style: TextStyle(fontWeight: FontWeight.w700)),
-          ],
-        ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.settings_outlined),
-            onPressed: () {},
-          ),
-        ],
-      ),
-      bottomNavigationBar: NavigationBar(
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: 'Home'),
-          NavigationDestination(icon: Icon(Icons.folder_outlined), selectedIcon: Icon(Icons.folder), label: 'Projects'),
-          NavigationDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings), label: 'Settings'),
-        ],
-        selectedIndex: 0,
-        onDestinationSelected: (i) {
-          if (i == 1) context.push('/projects');
-        },
-      ),
+      backgroundColor: AppColors.background,
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const SizedBox(height: 16),
-              Text(
-                'Find your perfect\npaint color',
-                style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Upload a room photo and AI will suggest colors,\nrender the result, and compare prices.',
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: Colors.grey[600],
-                    ),
-              ),
-              const SizedBox(height: 32),
-
-              // Primary CTA: Upload photo
-              _UploadCard(
-                icon: Icons.photo_library_outlined,
-                title: 'Upload Room Photo',
-                subtitle: 'Choose from your gallery',
-                color: Theme.of(context).colorScheme.primaryContainer,
-                onTap: () => _pickImage(context, ImageSource.gallery),
-              ),
-              const SizedBox(height: 16),
-
-              // Secondary CTA: Camera (mobile only)
-              if (!kIsWeb && (Platform.isIOS || Platform.isAndroid))
-                _UploadCard(
-                  icon: Icons.camera_alt_outlined,
-                  title: 'Take a Photo',
-                  subtitle: 'Use your camera',
-                  color: Theme.of(context).colorScheme.secondaryContainer,
-                  onTap: () => _pickImage(context, ImageSource.camera),
-                ),
-
-              const SizedBox(height: 32),
-              const Divider(),
-              const SizedBox(height: 16),
-              Text('Recently Analyzed', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600)),
-              const SizedBox(height: 12),
-
-              // Recent rooms placeholder (replaced by real data in PM-17)
-              Expanded(
-                child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
+        child: Column(
+          children: [
+            // App bar
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Row(
                     children: [
-                      Icon(Icons.image_outlined, size: 48, color: Colors.grey[300]),
-                      const SizedBox(height: 8),
-                      Text('No rooms analyzed yet', style: TextStyle(color: Colors.grey[500])),
+                      Container(
+                        width: 32,
+                        height: 32,
+                        decoration: BoxDecoration(
+                          color: AppColors.accent,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Icon(Icons.format_paint, color: Colors.black, size: 18),
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        'PaintMatch',
+                        style: GoogleFonts.playfairDisplay(
+                          color: AppColors.textPrimary,
+                          fontSize: 20,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
                     ],
                   ),
+                  IconButton(
+                    icon: const Icon(Icons.settings_outlined, color: AppColors.textSecondary),
+                    onPressed: () {},
+                  ),
+                ],
+              ),
+            ),
+
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 24),
+
+                    // Hero heading
+                    Text(
+                      'Find your\nperfect color',
+                      style: GoogleFonts.playfairDisplay(
+                        color: AppColors.textPrimary,
+                        fontSize: 36,
+                        fontWeight: FontWeight.w600,
+                        height: 1.15,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    const Text(
+                      'Upload a room photo and AI will suggest\npalettes, render the result, compare prices.',
+                      style: TextStyle(color: AppColors.textSecondary, fontSize: 14, height: 1.5),
+                    ),
+
+                    const SizedBox(height: 36),
+
+                    // Upload CTA
+                    _DarkUploadCard(
+                      icon: Icons.photo_library_outlined,
+                      title: 'Upload Room Photo',
+                      subtitle: 'Choose from gallery',
+                      onTap: () => _pickImage(context, ImageSource.gallery),
+                      isPrimary: true,
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Camera CTA (mobile only)
+                    if (!kIsWeb && (Platform.isIOS || Platform.isAndroid))
+                      _DarkUploadCard(
+                        icon: Icons.camera_alt_outlined,
+                        title: 'Take a Photo',
+                        subtitle: 'Use your camera',
+                        onTap: () => _pickImage(context, ImageSource.camera),
+                        isPrimary: false,
+                      ),
+
+                    const SizedBox(height: 36),
+
+                    // Style chips
+                    Text(
+                      'Popular Styles',
+                      style: GoogleFonts.playfairDisplay(
+                        color: AppColors.textPrimary,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: const [
+                        'Modern', 'Scandinavian', 'Traditional',
+                        'Farmhouse', 'Industrial', 'Coastal',
+                      ].map((s) => _StyleChip(label: s)).toList(),
+                    ),
+
+                    const SizedBox(height: 36),
+
+                    // Recent section
+                    Text(
+                      'Recent Analyses',
+                      style: GoogleFonts.playfairDisplay(
+                        color: AppColors.textPrimary,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    Center(
+                      child: Column(
+                        children: [
+                          Icon(Icons.image_outlined, size: 48, color: AppColors.textSecondary.withOpacity(0.3)),
+                          const SizedBox(height: 8),
+                          const Text('No rooms analyzed yet', style: TextStyle(color: AppColors.textSecondary, fontSize: 13)),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ],
-          ),
+            ),
+
+            // Bottom nav
+            _BottomNav(
+              selectedIndex: 0,
+              onTap: (i) { if (i == 1) context.push('/projects'); },
+            ),
+          ],
         ),
       ),
     );
   }
 }
 
-class _UploadCard extends StatelessWidget {
+class _DarkUploadCard extends StatelessWidget {
   final IconData icon;
   final String title;
   final String subtitle;
-  final Color color;
   final VoidCallback onTap;
+  final bool isPrimary;
 
-  const _UploadCard({
+  const _DarkUploadCard({
     required this.icon,
     required this.title,
     required this.subtitle,
-    required this.color,
     required this.onTap,
+    required this.isPrimary,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: color,
-      borderRadius: BorderRadius.circular(16),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(16),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
-          child: Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.6),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(icon, size: 28),
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: isPrimary ? AppColors.accent : AppColors.card,
+          borderRadius: BorderRadius.circular(18),
+          border: isPrimary ? null : Border.all(color: AppColors.border),
+        ),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: isPrimary ? Colors.black.withOpacity(0.15) : AppColors.accentDim,
+                borderRadius: BorderRadius.circular(12),
               ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(title, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
-                    const SizedBox(height: 2),
-                    Text(subtitle, style: TextStyle(color: Colors.grey[600], fontSize: 13)),
-                  ],
-                ),
+              child: Icon(icon, size: 24, color: isPrimary ? Colors.black : AppColors.accent),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      color: isPrimary ? Colors.black : AppColors.textPrimary,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 16,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      color: isPrimary ? Colors.black54 : AppColors.textSecondary,
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
               ),
-              const Icon(Icons.arrow_forward_ios, size: 16),
-            ],
-          ),
+            ),
+            Icon(Icons.arrow_forward_ios, size: 14,
+                color: isPrimary ? Colors.black54 : AppColors.textSecondary),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StyleChip extends StatelessWidget {
+  final String label;
+  const _StyleChip({required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppColors.card,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Text(label, style: const TextStyle(color: AppColors.textSecondary, fontSize: 13)),
+    );
+  }
+}
+
+class _BottomNav extends StatelessWidget {
+  final int selectedIndex;
+  final ValueChanged<int> onTap;
+  const _BottomNav({required this.selectedIndex, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: AppColors.bottomNav,
+      child: SafeArea(
+        top: false,
+        child: NavigationBar(
+          backgroundColor: AppColors.bottomNav,
+          selectedIndex: selectedIndex,
+          onDestinationSelected: onTap,
+          destinations: const [
+            NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: 'Home'),
+            NavigationDestination(icon: Icon(Icons.folder_outlined), selectedIcon: Icon(Icons.folder), label: 'Projects'),
+            NavigationDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings), label: 'Settings'),
+          ],
         ),
       ),
     );

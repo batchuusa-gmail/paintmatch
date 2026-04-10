@@ -1,21 +1,27 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:flutter/material.dart';
+import 'dart:ui' as ui;
 import 'package:before_after/before_after.dart';
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:share_plus/share_plus.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:http/http.dart' as http;
+import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
+import '../config/app_theme.dart';
+import '../services/api_service.dart';
 import '../services/supabase_service.dart';
 import '../utils/color_ext.dart';
 
 class RoomPreviewScreen extends StatefulWidget {
-  final String originalImageUrl;    // local file path or remote URL
-  final String? renderedImageUrl;   // remote URL from Replicate/Supabase
+  final String originalImageUrl;
+  final String? renderedImageUrl;
   final String selectedHex;
   final String selectedColorName;
+  final File? imageFile;
 
   const RoomPreviewScreen({
     super.key,
@@ -23,6 +29,7 @@ class RoomPreviewScreen extends StatefulWidget {
     required this.renderedImageUrl,
     required this.selectedHex,
     required this.selectedColorName,
+    this.imageFile,
   });
 
   @override
@@ -31,6 +38,52 @@ class RoomPreviewScreen extends StatefulWidget {
 
 class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   bool _saving = false;
+  String? _renderedUrl;
+  bool _rendering = false;
+  String _renderStatus = 'Rendering your room…';
+
+  @override
+  void initState() {
+    super.initState();
+    _renderedUrl = widget.renderedImageUrl;
+    if (_renderedUrl == null && widget.imageFile != null) _triggerRender();
+  }
+
+  Future<void> _triggerRender() async {
+    setState(() { _rendering = true; _renderStatus = 'Creating wall mask…'; });
+    try {
+      final bytes = await widget.imageFile!.readAsBytes();
+      final imageBase64 = base64Encode(bytes);
+
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      final img = frame.image;
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder);
+      canvas.drawRect(
+        Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble()),
+        Paint()..color = Colors.white,
+      );
+      final picture = recorder.endRecording();
+      final maskImg = await picture.toImage(img.width, img.height);
+      final maskByteData = await maskImg.toByteData(format: ui.ImageByteFormat.png);
+      final maskBase64 = base64Encode(maskByteData!.buffer.asUint8List());
+
+      setState(() => _renderStatus = 'AI is painting your room (~20-30s)…');
+
+      final result = await ApiService().renderRoom(
+        imageBase64: imageBase64,
+        wallMaskBase64: maskBase64,
+        targetHex: widget.selectedHex,
+        finish: 'eggshell',
+      );
+      if (mounted) setState(() => _renderedUrl = result['rendered_image_url']);
+    } catch (e) {
+      if (mounted) setState(() => _renderStatus = 'Render failed: $e');
+    } finally {
+      if (mounted) setState(() => _rendering = false);
+    }
+  }
 
   Widget _buildImage(String url) {
     if (url.startsWith('/') || url.startsWith('file://')) {
@@ -39,41 +92,34 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
     return CachedNetworkImage(
       imageUrl: url,
       fit: BoxFit.cover,
-      placeholder: (_, __) => Container(color: Colors.grey[200]),
-      errorWidget: (_, __, ___) => Container(color: Colors.grey[300]),
+      placeholder: (_, __) => Container(color: AppColors.card),
+      errorWidget: (_, __, ___) => Container(color: AppColors.card),
     );
   }
 
   Future<void> _saveToProject() async {
-    if (!SupabaseService().isSignedIn) {
-      context.push('/login');
-      return;
-    }
+    if (!SupabaseService().isSignedIn) { context.push('/login'); return; }
     setState(() => _saving = true);
     try {
       await SupabaseService().saveProject(
         projectName: widget.selectedColorName,
-        renderedImageUrl: widget.renderedImageUrl,
+        renderedImageUrl: _renderedUrl,
         selectedHex: widget.selectedHex,
       );
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Saved to projects!')),
-        );
-      }
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Saved to projects!')),
+      );
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Save failed: $e'), backgroundColor: Colors.red),
-        );
-      }
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Save failed: $e'), backgroundColor: AppColors.error),
+      );
     } finally {
       if (mounted) setState(() => _saving = false);
     }
   }
 
   Future<void> _shareImage() async {
-    final url = widget.renderedImageUrl ?? widget.originalImageUrl;
+    final url = _renderedUrl ?? widget.originalImageUrl;
     try {
       Uint8List bytes;
       if (url.startsWith('/') || url.startsWith('file://')) {
@@ -90,76 +136,92 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final color = HexColor.fromHex(widget.selectedHex);
-    final hasRender = widget.renderedImageUrl != null;
+    final swatchColor = HexColor.fromHex(widget.selectedHex);
+    final hasRender = _renderedUrl != null;
 
     return Scaffold(
+      backgroundColor: AppColors.background,
       appBar: AppBar(
-        title: const Text('Room Preview'),
+        backgroundColor: AppColors.background,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios, color: AppColors.textPrimary, size: 18),
+          onPressed: () => context.pop(),
+        ),
+        title: Text('Room Preview',
+            style: GoogleFonts.playfairDisplay(color: AppColors.textPrimary, fontWeight: FontWeight.w600)),
       ),
       body: Column(
         children: [
-          // Color name chip
+          // Color chip
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
             child: Row(
               children: [
                 Container(
-                  width: 24,
-                  height: 24,
+                  width: 26,
+                  height: 26,
                   decoration: BoxDecoration(
-                    color: color,
+                    color: swatchColor,
                     borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: Colors.grey[300]!),
+                    border: Border.all(color: AppColors.border),
                   ),
                 ),
+                const SizedBox(width: 10),
+                Text(widget.selectedColorName,
+                    style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.w600, fontSize: 15)),
                 const SizedBox(width: 8),
-                Text(
-                  widget.selectedColorName,
-                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
-                ),
-                const SizedBox(width: 6),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                   decoration: BoxDecoration(
-                    color: Colors.grey[100],
+                    color: AppColors.card,
                     borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: AppColors.border),
                   ),
-                  child: Text(
-                    widget.selectedHex.toUpperCase(),
-                    style: TextStyle(fontSize: 11, color: Colors.grey[600], fontFamily: 'monospace'),
-                  ),
+                  child: Text(widget.selectedHex.toUpperCase(),
+                      style: const TextStyle(color: AppColors.textSecondary, fontSize: 11, fontFamily: 'monospace')),
                 ),
               ],
             ),
           ),
 
-          const SizedBox(height: 12),
-
-          // Before / After slider
+          // Before/After or loading
           Expanded(
             child: hasRender
                 ? BeforeAfter(
-                    thumbColor: Theme.of(context).colorScheme.primary,
-                    beforeImage: _buildImage(widget.originalImageUrl),
-                    afterImage: _buildImage(widget.renderedImageUrl!),
+                    thumbColor: AppColors.accent,
+                    before: _buildImage(widget.originalImageUrl),
+                    after: _buildImage(_renderedUrl!),
                   )
                 : Stack(
+                    fit: StackFit.expand,
                     children: [
                       _buildImage(widget.originalImageUrl),
+                      Container(color: Colors.black54),
                       Center(
                         child: Container(
-                          padding: const EdgeInsets.all(20),
+                          margin: const EdgeInsets.all(40),
+                          padding: const EdgeInsets.all(24),
                           decoration: BoxDecoration(
-                            color: Colors.black54,
-                            borderRadius: BorderRadius.circular(12),
+                            color: AppColors.card,
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: AppColors.border),
                           ),
-                          child: const Column(
+                          child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              CircularProgressIndicator(color: Colors.white),
-                              SizedBox(height: 12),
-                              Text('Rendering (~20-30s)', style: TextStyle(color: Colors.white)),
+                              if (_rendering)
+                                const CircularProgressIndicator(color: AppColors.accent, strokeWidth: 2),
+                              if (_rendering) const SizedBox(height: 16),
+                              Text(_renderStatus,
+                                  style: const TextStyle(color: AppColors.textPrimary, fontSize: 14),
+                                  textAlign: TextAlign.center),
+                              if (!_rendering && _renderedUrl == null) ...[
+                                const SizedBox(height: 16),
+                                FilledButton(
+                                  onPressed: _triggerRender,
+                                  child: const Text('Retry'),
+                                ),
+                              ],
                             ],
                           ),
                         ),
@@ -169,34 +231,30 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
           ),
 
           // Action bar
-          Padding(
-            padding: const EdgeInsets.all(16),
+          Container(
+            color: AppColors.bottomNav,
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
             child: Row(
               children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    icon: const Icon(Icons.share_outlined),
-                    label: const Text('Share'),
-                    onPressed: _shareImage,
-                    style: OutlinedButton.styleFrom(
-                      minimumSize: const Size.fromHeight(48),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    ),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.share_outlined, size: 18),
+                  label: const Text('Share'),
+                  onPressed: _shareImage,
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(0, 48),
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
                   ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
-                  flex: 2,
                   child: FilledButton.icon(
                     icon: _saving
-                        ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                        : const Icon(Icons.bookmark_add_outlined),
+                        ? const SizedBox(width: 16, height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
+                        : const Icon(Icons.bookmark_add_outlined, size: 18, color: Colors.black),
                     label: const Text('Save to Project'),
                     onPressed: _saving ? null : _saveToProject,
-                    style: FilledButton.styleFrom(
-                      minimumSize: const Size.fromHeight(48),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    ),
+                    style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
                   ),
                 ),
               ],

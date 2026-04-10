@@ -1,7 +1,9 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:google_fonts/google_fonts.dart';
 
+import '../config/app_theme.dart';
 import '../models/room_analysis.dart';
 import '../models/paint_color.dart';
 import '../services/api_service.dart';
@@ -47,108 +49,123 @@ class _PaletteSuggestionsScreenState extends State<PaletteSuggestionsScreen> {
   }
 
   void _selectPalette(int index) {
-    setState(() {
-      _selectedIndex = index;
-      _vendorMatches = null;
-    });
+    setState(() { _selectedIndex = index; _vendorMatches = null; });
     _loadVendorMatches();
   }
 
-  PaletteSuggestion get _selected =>
-      widget.analysis.recommendedPalettes[_selectedIndex];
+  PaletteSuggestion get _selected => widget.analysis.recommendedPalettes[_selectedIndex];
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: AppColors.background,
       appBar: AppBar(
-        title: const Text('Color Suggestions'),
+        backgroundColor: AppColors.background,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios, color: AppColors.textPrimary, size: 18),
+          onPressed: () => context.pop(),
+        ),
+        title: Text('Color Suggestions',
+            style: GoogleFonts.playfairDisplay(color: AppColors.textPrimary, fontWeight: FontWeight.w600)),
         actions: [
           TextButton.icon(
-            icon: const Icon(Icons.refresh),
-            label: const Text('Regenerate'),
+            icon: const Icon(Icons.refresh, color: AppColors.accent, size: 16),
+            label: const Text('Regenerate', style: TextStyle(color: AppColors.accent, fontSize: 13)),
             onPressed: () => context.pushReplacement('/loading', extra: widget.imageFile),
           ),
         ],
       ),
       body: SingleChildScrollView(
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Room image thumbnail
+            // Room image
             SizedBox(
               height: 200,
+              width: double.infinity,
               child: Image.file(widget.imageFile, fit: BoxFit.cover),
             ),
 
-            const SizedBox(height: 20),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Text('Choose a palette',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600)),
-            ),
-            const SizedBox(height: 12),
-
-            // Horizontal scrollable palette cards
-            SizedBox(
-              height: 160,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                itemCount: widget.analysis.recommendedPalettes.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 12),
-                itemBuilder: (context, i) {
-                  final palette = widget.analysis.recommendedPalettes[i];
-                  final isSelected = i == _selectedIndex;
-                  return _PaletteCard(
-                    palette: palette,
-                    isSelected: isSelected,
-                    onTap: () => _selectPalette(i),
-                  );
-                },
+            // Gradient overlay at bottom of image
+            Container(
+              height: 40,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [Colors.transparent, AppColors.background],
+                ),
               ),
             ),
 
-            const SizedBox(height: 24),
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Choose a palette',
+                      style: GoogleFonts.playfairDisplay(
+                          color: AppColors.textPrimary, fontSize: 22, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 4),
+                  const Text('Tap a card to see vendor matches below',
+                      style: TextStyle(color: AppColors.textSecondary, fontSize: 13)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Horizontal palette cards
+            SizedBox(
+              height: 170,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                itemCount: widget.analysis.recommendedPalettes.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 12),
+                itemBuilder: (_, i) => _PaletteCard(
+                  palette: widget.analysis.recommendedPalettes[i],
+                  isSelected: i == _selectedIndex,
+                  onTap: () => _selectPalette(i),
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 28),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
               child: Text('Vendor Matches',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600)),
+                  style: GoogleFonts.playfairDisplay(
+                      color: AppColors.textPrimary, fontSize: 18, fontWeight: FontWeight.w600)),
             ),
             const SizedBox(height: 12),
 
             if (_loadingVendors)
               const Padding(
                 padding: EdgeInsets.all(32),
-                child: Center(child: CircularProgressIndicator()),
+                child: Center(child: CircularProgressIndicator(color: AppColors.accent)),
               )
             else if (_vendorMatches != null)
-              VendorComparisonCard(
-                targetHex: _selected.hex,
-                matches: _vendorMatches!,
-              ),
+              VendorComparisonCard(targetHex: _selected.hex, matches: _vendorMatches!),
 
             const SizedBox(height: 24),
 
-            // Preview button
+            // Preview CTA
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 20),
               child: FilledButton.icon(
-                icon: const Icon(Icons.visibility),
+                icon: const Icon(Icons.visibility, color: Colors.black),
                 label: const Text('Preview in Your Room'),
-                style: FilledButton.styleFrom(
-                  minimumSize: const Size.fromHeight(52),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                ),
                 onPressed: () => context.push('/preview', extra: {
                   'originalImageUrl': widget.imageFile.path,
                   'renderedImageUrl': null,
                   'selectedHex': _selected.hex,
                   'selectedColorName': _selected.name,
                   'imageFile': widget.imageFile,
+                  'finish': 'eggshell',
                 }),
               ),
             ),
-            const SizedBox(height: 32),
+            const SizedBox(height: 40),
           ],
         ),
       ),
@@ -170,38 +187,48 @@ class _PaletteCard extends StatelessWidget {
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
-        width: 140,
+        width: 145,
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
-            color: isSelected ? Theme.of(context).colorScheme.primary : Colors.transparent,
-            width: 2.5,
+            color: isSelected ? AppColors.accent : AppColors.border,
+            width: isSelected ? 2 : 1,
           ),
-          boxShadow: isSelected
-              ? [BoxShadow(color: Colors.black.withOpacity(0.12), blurRadius: 8, offset: const Offset(0, 4))]
-              : [],
+          color: AppColors.card,
         ),
         child: ClipRRect(
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(15),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              // Color swatch
               Expanded(flex: 3, child: Container(color: color)),
+              // Info
               Container(
-                color: Colors.white,
+                color: AppColors.card,
                 padding: const EdgeInsets.all(10),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(palette.name,
-                        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis),
-                    const SizedBox(height: 2),
+                        style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.w600, fontSize: 12),
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    const SizedBox(height: 3),
                     Text(palette.rationale,
-                        style: TextStyle(fontSize: 10, color: Colors.grey[600]),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis),
+                        style: const TextStyle(color: AppColors.textSecondary, fontSize: 10),
+                        maxLines: 2, overflow: TextOverflow.ellipsis),
+                    if (isSelected) ...[
+                      const SizedBox(height: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: AppColors.accentDim,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: const Text('Selected',
+                            style: TextStyle(color: AppColors.accent, fontSize: 9, fontWeight: FontWeight.w700)),
+                      ),
+                    ],
                   ],
                 ),
               ),

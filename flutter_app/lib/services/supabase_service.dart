@@ -67,7 +67,7 @@ class SupabaseService {
       'vendor_picks': vendorPicks,
     }).select().single();
 
-    return UserProject.fromJson(response as Map<String, dynamic>);
+    return UserProject.fromJson(response);
   }
 
   Future<void> deleteProject(String projectId) async {

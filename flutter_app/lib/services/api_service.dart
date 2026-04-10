@@ -31,8 +31,13 @@ class ApiService {
       contentType: MediaType.parse('image/jpeg'),
     ));
 
+    print('[API] Sending ${bytes.length} bytes to $_base/analyze-room');
+
     final streamed = await request.send();
     final body = await http.Response.fromStream(streamed);
+
+    print('[API] Response status: ${body.statusCode}');
+    print('[API] Response body: ${body.body}');
 
     if (body.statusCode != 200) {
       throw Exception('Server error ${body.statusCode}: ${body.body}');
@@ -93,9 +98,4 @@ class ApiService {
         .toList();
   }
 
-  String _mimeType(String path) {
-    final ext = path.split('.').last.toLowerCase();
-    const map = {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'webp': 'image/webp'};
-    return map[ext] ?? 'image/jpeg';
-  }
 }

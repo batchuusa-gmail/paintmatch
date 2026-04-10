@@ -26,7 +26,7 @@ dependencies:
   http: ^1.2.1
 
   # Before/after slider
-  before_after: ^2.0.1
+  before_after: ^3.2.0
 
   # Shimmer loading effect
   shimmer: ^3.0.0
@@ -42,6 +42,9 @@ dependencies:
 
   # Path provider (temp files)
   path_provider: ^2.1.3
+
+  # Google Fonts
+  google_fonts: ^6.2.1
 
   # Icons
   cupertino_icons: ^1.0.8

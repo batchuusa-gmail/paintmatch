@@ -36,12 +36,12 @@ class _AnalysisLoadingScreenState extends State<AnalysisLoadingScreen> {
         'imageFile': widget.imageFile,
         'analysis': analysis,
       });
-    } catch (e) {
+    } catch (e, stack) {
+      print('[PaintMatch ERROR] $e');
+      print('[PaintMatch STACK] $stack');
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Analysis failed: $e'), backgroundColor: Colors.red),
-      );
-      context.pop();
+      // Show error on screen instead of disappearing snackbar
+      setState(() => _status = 'Error: $e');
     }
   }
 
