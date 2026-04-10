@@ -4,6 +4,7 @@ Accepts room image + wall mask + target HEX + finish.
 Calls Replicate SD-inpainting, polls for result, caches in Supabase Storage.
 """
 import base64
+import io
 import os
 import time
 import uuid
@@ -11,6 +12,7 @@ import uuid
 import replicate
 import requests
 from flask import Blueprint, request, jsonify
+from PIL import Image, ImageOps
 
 _replicate_client = None
 
@@ -85,12 +87,24 @@ def render_room():
     if finish not in {"matte", "eggshell", "satin", "gloss"}:
         finish = "matte"
 
-    # Decode base64 → bytes and wrap as data URIs for Replicate
+    # Decode base64 → bytes
     try:
         image_bytes = base64.b64decode(image_b64)
         mask_bytes = base64.b64decode(mask_b64)
     except Exception:
         return jsonify({"data": None, "error": "Invalid base64 data"}), 400
+
+    # Correct EXIF rotation so Replicate sees upright image
+    try:
+        pil_img = Image.open(io.BytesIO(image_bytes))
+        pil_img = ImageOps.exif_transpose(pil_img)
+        if pil_img.mode != "RGB":
+            pil_img = pil_img.convert("RGB")
+        buf = io.BytesIO()
+        pil_img.save(buf, format="JPEG", quality=85)
+        image_bytes = buf.getvalue()
+    except Exception:
+        pass  # use original bytes if correction fails
 
     image_uri = "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode()
     mask_uri = "data:image/png;base64," + base64.b64encode(mask_bytes).decode()
