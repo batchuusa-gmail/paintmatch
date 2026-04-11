@@ -10,8 +10,6 @@ import io
 import numpy as np
 from flask import Blueprint, jsonify, request
 from PIL import Image, ImageFilter, ImageOps
-from skimage.segmentation import slic
-from skimage.util import img_as_float
 
 segment_wall_bp = Blueprint("segment_wall", __name__)
 
@@ -25,6 +23,9 @@ def _segment(pil: Image.Image, surface: str) -> Image.Image:
       floor   — dominant cluster in the bottom 30%
       ceiling — dominant cluster in the top 20%
     """
+    from skimage.segmentation import slic
+    from skimage.util import img_as_float
+
     W, H = pil.size
     work_w, work_h = min(W, 512), min(H, 512)
     small = pil.resize((work_w, work_h), Image.BILINEAR)
