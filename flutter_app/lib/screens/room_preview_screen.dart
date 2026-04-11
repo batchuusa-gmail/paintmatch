@@ -47,14 +47,47 @@ class _BlendParams {
   });
 }
 
+// RGB ↔ HSL helpers (all values 0.0–1.0)
+List<double> _rgbToHsl(double r, double g, double b) {
+  final max = [r, g, b].reduce((a, x) => x > a ? x : a);
+  final min = [r, g, b].reduce((a, x) => x < a ? x : a);
+  final l = (max + min) / 2.0;
+  if (max == min) return [0.0, 0.0, l];
+  final d = max - min;
+  final s = l > 0.5 ? d / (2.0 - max - min) : d / (max + min);
+  double h;
+  if (max == r)      h = (g - b) / d + (g < b ? 6 : 0);
+  else if (max == g) h = (b - r) / d + 2;
+  else               h = (r - g) / d + 4;
+  return [h / 6.0, s, l];
+}
+
+double _hue2rgb(double p, double q, double t) {
+  if (t < 0) t += 1;
+  if (t > 1) t -= 1;
+  if (t < 1/6) return p + (q - p) * 6 * t;
+  if (t < 1/2) return q;
+  if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+  return p;
+}
+
+List<double> _hslToRgb(double h, double s, double l) {
+  if (s == 0) return [l, l, l];
+  final q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  final p = 2 * l - q;
+  return [_hue2rgb(p, q, h + 1/3), _hue2rgb(p, q, h), _hue2rgb(p, q, h - 1/3)];
+}
+
 Uint8List _blendIsolate(_BlendParams p) {
   final src  = p.srcRgba;
   final mask = p.maskRgba;
   final out  = Uint8List.fromList(src);
   final total = p.srcW * p.srcH;
+
+  // Target color in HSL — we'll use its H and S, keep original L per pixel
   final tR = p.tR / 255.0, tG = p.tG / 255.0, tB = p.tB / 255.0;
-  // Luminance of target color
-  final tLum = 0.299 * tR + 0.587 * tG + 0.114 * tB;
+  final targetHsl = _rgbToHsl(tR, tG, tB);
+  final tH = targetHsl[0], tS = targetHsl[1];
 
   for (int i = 0; i < total; i++) {
     final sb = i * 4;
@@ -64,20 +97,20 @@ Uint8List _blendIsolate(_BlendParams p) {
 
     final r = src[sb] / 255.0, g = src[sb+1] / 255.0, b = src[sb+2] / 255.0;
 
-    // Luminosity-preserving recolor:
-    // Scale target color so its luminance matches original pixel's luminance.
-    // This keeps shadows/highlights/texture but swaps the hue+saturation.
-    final srcLum = 0.299 * r + 0.587 * g + 0.114 * b;
-    final scale  = (tLum > 0.001) ? (srcLum / tLum) : 1.0;
-    final reR = (tR * scale).clamp(0.0, 1.0);
-    final reG = (tG * scale).clamp(0.0, 1.0);
-    final reB = (tB * scale).clamp(0.0, 1.0);
+    // HSL Color blend mode (same as Photoshop "Color" layer):
+    // Keep original Lightness, apply target Hue + Saturation.
+    // This changes the color dramatically while preserving shadows/texture.
+    final srcHsl = _rgbToHsl(r, g, b);
+    final srcL   = srcHsl[2];
 
-    // 85% recolored + 15% original for subtle texture retention
-    const s = 0.85;
-    out[sb]   = ((reR * s + r * (1 - s)) * 255).round().clamp(0, 255);
-    out[sb+1] = ((reG * s + g * (1 - s)) * 255).round().clamp(0, 255);
-    out[sb+2] = ((reB * s + b * (1 - s)) * 255).round().clamp(0, 255);
+    // Blend 90% target HS + 10% original HS for subtle texture retention
+    final blendH = tH;
+    final blendS = tS * 0.9 + srcHsl[1] * 0.1;
+
+    final recolored = _hslToRgb(blendH, blendS, srcL);
+    out[sb]   = (recolored[0] * 255).round().clamp(0, 255);
+    out[sb+1] = (recolored[1] * 255).round().clamp(0, 255);
+    out[sb+2] = (recolored[2] * 255).round().clamp(0, 255);
   }
   return out;
 }
