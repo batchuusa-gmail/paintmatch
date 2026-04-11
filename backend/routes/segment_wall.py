@@ -1,13 +1,11 @@
 """
 POST /segment-wall
-Professional tap-to-paint segmentation:
-  - If seed_x / seed_y provided (0–1 fractions): SLIC + seed-label expansion
-    User tapped the surface → we expand from that exact point to similar regions.
-  - If no seed: spatial heuristic fallback (automatic mode).
-Returns base64 PNG mask — white = target surface, black = everything else.
+Connected-region flood fill on SLIC superpixels.
+Expands only through *adjacent* superpixels — cannot jump to ceiling/floor.
 """
 import base64
 import io
+from collections import deque
 
 import numpy as np
 from flask import Blueprint, jsonify, request
@@ -15,117 +13,172 @@ from PIL import Image, ImageFilter, ImageOps
 
 segment_wall_bp = Blueprint("segment_wall", __name__)
 
-WORK_SIZE = 512   # resize longest edge to this before segmentation
+WORK_SIZE = 512
 
 
-def _resize_keep_aspect(pil: Image.Image) -> tuple[Image.Image, float]:
-    """Resize so longest edge = WORK_SIZE. Returns (resized, scale_factor)."""
+def _resize_work(pil: Image.Image):
     w, h = pil.size
     scale = WORK_SIZE / max(w, h)
-    new_w, new_h = int(w * scale), int(h * scale)
-    return pil.resize((new_w, new_h), Image.BILINEAR), scale
+    nw, nh = int(w * scale), int(h * scale)
+    return pil.resize((nw, nh), Image.BILINEAR)
 
 
-def _run_slic(arr):
+def _build_adjacency(segments: np.ndarray):
+    """Return dict: label → set of adjacent labels (4-connectivity)."""
+    adj = {}
+    n = int(segments.max()) + 1
+    for i in range(n):
+        adj[i] = set()
+
+    h, w = segments.shape
+    for r in range(h):
+        for c in range(w):
+            lbl = int(segments[r, c])
+            for dr, dc in ((0, 1), (1, 0)):
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < h and 0 <= nc < w:
+                    nb = int(segments[nr, nc])
+                    if nb != lbl:
+                        adj[lbl].add(nb)
+                        adj[nb].add(lbl)
+    return adj
+
+
+def _lab_mean(px: np.ndarray):
+    from skimage.color import rgb2lab
+    return rgb2lab(px.mean(axis=0).reshape(1, 1, 3)).reshape(3)
+
+
+def _segment_flood(pil: Image.Image, seed_x: float, seed_y: float) -> Image.Image:
+    """BFS flood fill from tapped superpixel through adjacent similar-color regions."""
     from skimage.segmentation import slic
     from skimage.util import img_as_float
-    if arr.dtype != float:
-        arr = img_as_float(arr)
-    return slic(arr, n_segments=400, compactness=8, sigma=1,
-                start_label=0, channel_axis=2), arr
 
-
-def _segment_from_seed(pil: Image.Image, seed_x: float, seed_y: float) -> Image.Image:
-    """
-    User tapped (seed_x, seed_y) — find the superpixel there and expand to
-    all superpixels with a similar color. This is how professional apps work.
-    """
-    small, _ = _resize_keep_aspect(pil)
-    arr_raw = np.array(small)
-    segments, arr = _run_slic(arr_raw)
+    small = _resize_work(pil)
+    arr = img_as_float(np.array(small))
+    segments = slic(arr, n_segments=300, compactness=12, sigma=1,
+                    start_label=0, channel_axis=2)
 
     h, w = segments.shape
     sy = int(seed_y * h)
     sx = int(seed_x * w)
     sy = max(0, min(sy, h - 1))
     sx = max(0, min(sx, w - 1))
+    seed_lbl = int(segments[sy, sx])
 
-    seed_label = int(segments[sy, sx])
-    seed_color = arr[segments == seed_label].mean(axis=0)   # (3,) float
-
-    # Expand: include superpixels whose mean color is close to seed_color
-    # Use LAB-space distance for perceptual accuracy
-    from skimage.color import rgb2lab
-    seed_lab = rgb2lab(seed_color.reshape(1, 1, 3)).reshape(3)
-
+    # Per-label LAB mean
     n_labels = int(segments.max()) + 1
-    out = np.zeros((h, w), dtype=np.uint8)
+    lab_means = {}
     for lbl in range(n_labels):
         px = arr[segments == lbl]
-        if len(px) == 0:
-            continue
-        mean_rgb = px.mean(axis=0).reshape(1, 1, 3)
-        mean_lab = rgb2lab(mean_rgb).reshape(3)
-        delta_e = float(np.linalg.norm(mean_lab - seed_lab))
-        if delta_e < 18:          # perceptual color distance threshold
-            out[segments == lbl] = 255
+        if len(px):
+            lab_means[lbl] = _lab_mean(px)
+
+    seed_lab = lab_means[seed_lbl]
+
+    # Build adjacency once
+    adj = _build_adjacency(segments)
+
+    # BFS: only cross into adjacent superpixel if its color is close enough
+    THRESHOLD = 14   # perceptual LAB delta-E — tight enough to stop at edges
+
+    visited = {seed_lbl}
+    queue = deque([seed_lbl])
+    selected = {seed_lbl}
+
+    while queue:
+        lbl = queue.popleft()
+        for nb in adj[lbl]:
+            if nb in visited:
+                continue
+            visited.add(nb)
+            nb_lab = lab_means.get(nb)
+            if nb_lab is None:
+                continue
+            dist = float(np.linalg.norm(nb_lab - seed_lab))
+            if dist < THRESHOLD:
+                selected.add(nb)
+                queue.append(nb)
+
+    out = np.zeros((h, w), dtype=np.uint8)
+    for lbl in selected:
+        out[segments == lbl] = 255
 
     return Image.fromarray(out, mode="L").resize(pil.size, Image.NEAREST)
 
 
 def _segment_auto(pil: Image.Image, surface: str) -> Image.Image:
-    """Automatic spatial heuristic fallback when no seed is given."""
-    small, _ = _resize_keep_aspect(pil)
-    arr_raw = np.array(small)
-    segments, arr = _run_slic(arr_raw)
+    """Fallback when no tap seed — spatial heuristic."""
+    from skimage.segmentation import slic
+    from skimage.util import img_as_float
+    from skimage.color import rgb2lab
+
+    small = _resize_work(pil)
+    arr = img_as_float(np.array(small))
+    segments = slic(arr, n_segments=300, compactness=12, sigma=1,
+                    start_label=0, channel_axis=2)
 
     h, w = segments.shape
     brightness = arr.mean(axis=2)
 
     if surface == "floor":
-        r0, r1, c0, c1 = int(h * 0.65), h, 0, w
-        valid = brightness < 0.80
+        r0, r1, c0, c1 = int(h * 0.70), h, 0, w
+        valid = brightness < 0.82
     elif surface == "ceiling":
-        r0, r1, c0, c1 = 0, int(h * 0.22), 0, w
+        r0, r1, c0, c1 = 0, int(h * 0.20), 0, w
         valid = brightness > 0.30
-    else:  # wall
-        r0, r1, c0, c1 = int(h * 0.15), int(h * 0.80), int(w * 0.05), int(w * 0.95)
-        valid = (brightness > 0.10) & (brightness < 0.90)
+    else:
+        r0, r1, c0, c1 = int(h * 0.15), int(h * 0.80), int(w * 0.08), int(w * 0.92)
+        valid = (brightness > 0.12) & (brightness < 0.88)
 
     roi_mask = np.zeros((h, w), dtype=bool)
     roi_mask[r0:r1, c0:c1] = True
     roi_mask &= valid
-
     roi_labels = segments[roi_mask]
     if len(roi_labels) == 0:
         roi_labels = segments[r0:r1, c0:c1].flatten()
 
     dominant = int(np.bincount(roi_labels).argmax())
-    dom_color = arr[segments == dominant].mean(axis=0)
+    dom_lab = _lab_mean(arr[segments == dominant])
 
-    from skimage.color import rgb2lab
-    dom_lab = rgb2lab(dom_color.reshape(1, 1, 3)).reshape(3)
-
+    # Use BFS from dominant label (connected only)
+    adj = _build_adjacency(segments)
     n_labels = int(segments.max()) + 1
-    out = np.zeros((h, w), dtype=np.uint8)
+    lab_means = {}
     for lbl in range(n_labels):
         px = arr[segments == lbl]
-        if len(px) == 0:
-            continue
-        seg_brightness = float(px.mean())
-        if surface == "wall" and (seg_brightness > 0.88 or seg_brightness < 0.10):
-            continue
-        mean_lab = rgb2lab(px.mean(axis=0).reshape(1, 1, 3)).reshape(3)
-        if float(np.linalg.norm(mean_lab - dom_lab)) < 18:
-            out[segments == lbl] = 255
+        if len(px):
+            lab_means[lbl] = _lab_mean(px)
+
+    visited = {dominant}
+    queue = deque([dominant])
+    selected = {dominant}
+    THRESHOLD = 14
+
+    while queue:
+        lbl = queue.popleft()
+        for nb in adj[lbl]:
+            if nb in visited:
+                continue
+            visited.add(nb)
+            nb_lab = lab_means.get(nb)
+            if nb_lab is None:
+                continue
+            if float(np.linalg.norm(nb_lab - dom_lab)) < THRESHOLD:
+                selected.add(nb)
+                queue.append(nb)
+
+    out = np.zeros((h, w), dtype=np.uint8)
+    for lbl in selected:
+        out[segments == lbl] = 255
 
     return Image.fromarray(out, mode="L").resize(pil.size, Image.NEAREST)
 
 
 def _clean_mask(mask: Image.Image) -> Image.Image:
-    blurred = mask.filter(ImageFilter.GaussianBlur(radius=4))
+    blurred = mask.filter(ImageFilter.GaussianBlur(radius=3))
     binary  = blurred.point(lambda p: 255 if p > 100 else 0)
-    eroded  = binary.filter(ImageFilter.MinFilter(size=5))
+    eroded  = binary.filter(ImageFilter.MinFilter(size=3))
     return eroded
 
 
@@ -134,8 +187,8 @@ def segment_wall():
     data = request.get_json(force=True, silent=True) or {}
     image_b64     = data.get("image")
     surface_param = data.get("surface", "wall").lower().split(",")[0].strip()
-    seed_x        = data.get("seed_x")   # float 0–1 or None
-    seed_y        = data.get("seed_y")   # float 0–1 or None
+    seed_x        = data.get("seed_x")
+    seed_y        = data.get("seed_y")
 
     if not image_b64:
         return jsonify({"data": None, "error": "Missing image"}), 400
@@ -152,10 +205,10 @@ def segment_wall():
 
     try:
         if seed_x is not None and seed_y is not None:
-            raw = _segment_from_seed(pil, float(seed_x), float(seed_y))
-            method = "seed"
+            raw    = _segment_flood(pil, float(seed_x), float(seed_y))
+            method = "flood"
         else:
-            raw = _segment_auto(pil, surface_param)
+            raw    = _segment_auto(pil, surface_param)
             method = "auto"
         cleaned = _clean_mask(raw)
     except Exception as e:
