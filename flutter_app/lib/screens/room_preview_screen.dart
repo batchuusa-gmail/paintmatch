@@ -41,118 +41,113 @@ class RoomPreviewScreen extends StatefulWidget {
 
 class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   bool _saving = false;
-  String? _renderedUrl;
   bool _rendering = false;
-  String _renderStatus = 'Rendering your room…';
+  String _renderStatus = '';
+  String _selectedSurface = 'wall'; // wall | ceiling | floor
+
+  ui.Image? _srcImage;
+  Uint8List? _srcRgba;
+  Uint8List? _srcJpeg;      // raw JPEG to send to backend
+  Uint8List? _renderedBytes;
 
   @override
   void initState() {
     super.initState();
-    _renderedUrl = widget.renderedImageUrl;
-    if (_renderedUrl == null && widget.imageFile != null) {
-      _triggerRender();
+    _loadAndRender();
+  }
+
+  Future<void> _loadAndRender() async {
+    setState(() { _rendering = true; _renderStatus = 'Loading image…'; });
+    try {
+      final rawBytes = await widget.imageFile!.readAsBytes();
+      _srcJpeg = rawBytes;
+
+      // dart:ui applies EXIF rotation automatically
+      final codec = await ui.instantiateImageCodec(rawBytes);
+      final frame = await codec.getNextFrame();
+      final img = frame.image;
+      final byteData = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
+      _srcImage = img;
+      _srcRgba = byteData!.buffer.asUint8List();
+
+      await _runSegmentAndPaint(_selectedSurface);
+    } catch (e) {
+      if (mounted) setState(() { _rendering = false; _renderStatus = 'Failed: $e'; });
     }
   }
 
-  Future<void> _triggerRender() async {
-    setState(() { _rendering = true; _renderStatus = 'Creating wall mask…'; });
+  Future<void> _runSegmentAndPaint(String surface) async {
+    if (_srcImage == null || _srcRgba == null || _srcJpeg == null) return;
+    setState(() { _rendering = true; _renderedBytes = null; _renderStatus = 'Detecting $surface…'; });
     try {
-      // Read raw JPEG bytes — Flutter Image.file handles EXIF rotation for display
-      // Backend will apply exif_transpose before sending to Replicate
-      final bytes = await widget.imageFile!.readAsBytes();
-      final imageBase64 = base64Encode(bytes);
-
-      // Decode image — dart:ui applies EXIF correction here
-      // We use this ONLY for mask generation (correct dimensions)
-      final codec = await ui.instantiateImageCodec(bytes);
-      final frame = await codec.getNextFrame();
-      final img = frame.image;
-
-      final maskBase64 = widget.wallHex != null
-          ? await _generateWallMask(img, widget.wallHex!)
-          : await _whiteMask(img);
-
-      setState(() => _renderStatus = 'AI is painting your room (~30s)…');
-
-      final result = await ApiService().renderRoom(
+      // 1. Get AI wall mask from backend
+      final imageBase64 = base64Encode(_srcJpeg!);
+      final maskBase64 = await ApiService().segmentWall(
         imageBase64: imageBase64,
-        wallMaskBase64: maskBase64,
-        targetHex: widget.selectedHex,
-        finish: 'eggshell',
+        surface: surface,
       );
 
-      debugPrint('[Render] result: $result');
+      setState(() => _renderStatus = 'Painting $surface…');
 
-      if (mounted) setState(() => _renderedUrl = result['rendered_image_url']);
-    } catch (e, stack) {
-      debugPrint('[Render] error: $e\n$stack');
-      if (mounted) setState(() => _renderStatus = 'Render failed: $e');
+      // 2. Decode mask PNG → RGBA bytes
+      final maskBytes = base64Decode(maskBase64);
+      final maskCodec = await ui.instantiateImageCodec(maskBytes);
+      final maskFrame = await maskCodec.getNextFrame();
+      final maskImg = maskFrame.image;
+      final maskByteData = await maskImg.toByteData(format: ui.ImageByteFormat.rawRgba);
+      final mask = maskByteData!.buffer.asUint8List();
+
+      // 3. Resize mask to match src image if needed
+      final srcW = _srcImage!.width, srcH = _srcImage!.height;
+      final maskW = maskImg.width, maskH = maskImg.height;
+
+      // 4. Apply color blend where mask is white
+      final target = HexColor.fromHex(widget.selectedHex);
+      final tR = target.red, tG = target.green, tB = target.blue;
+      final src = _srcRgba!;
+      final out = Uint8List.fromList(src);
+
+      const blend = 0.72;
+      final total = srcW * srcH;
+
+      for (int i = 0; i < total; i++) {
+        final srcBase = i * 4;
+        // Map src pixel to mask pixel (mask may be different size)
+        final mx = ((i % srcW) * maskW / srcW).round().clamp(0, maskW - 1);
+        final my = ((i ~/ srcW) * maskH / srcH).round().clamp(0, maskH - 1);
+        final maskBase = (my * maskW + mx) * 4;
+
+        final maskVal = mask[maskBase]; // R channel of mask (0=black, 255=white)
+        if (maskVal > 127) {
+          final r = src[srcBase], g = src[srcBase + 1], b = src[srcBase + 2];
+          out[srcBase]     = (r * (1 - blend) + tR * blend).round().clamp(0, 255);
+          out[srcBase + 1] = (g * (1 - blend) + tG * blend).round().clamp(0, 255);
+          out[srcBase + 2] = (b * (1 - blend) + tB * blend).round().clamp(0, 255);
+        }
+      }
+
+      // 5. Encode result as PNG
+      final c = Completer<ui.Image>();
+      ui.decodeImageFromPixels(out, srcW, srcH, ui.PixelFormat.rgba8888, c.complete);
+      final rendered = await c.future;
+      final bd = await rendered.toByteData(format: ui.ImageByteFormat.png);
+
+      if (mounted) setState(() => _renderedBytes = bd!.buffer.asUint8List());
+    } catch (e, s) {
+      debugPrint('[Render] $e\n$s');
+      if (mounted) setState(() => _renderStatus = 'Failed: $e');
     } finally {
       if (mounted) setState(() => _rendering = false);
     }
   }
 
-  /// White mask covering the entire image (fallback when wall_hex unknown)
-  Future<String> _whiteMask(ui.Image img) async {
-    final recorder = ui.PictureRecorder();
-    Canvas(recorder).drawRect(
-      Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble()),
-      Paint()..color = Colors.white,
-    );
-    final maskImg = await recorder.endRecording().toImage(img.width, img.height);
-    final byteData = await maskImg.toByteData(format: ui.ImageByteFormat.png);
-    return base64Encode(byteData!.buffer.asUint8List());
-  }
-
-  /// Smart mask: white where pixels are close to wall color, black elsewhere
-  Future<String> _generateWallMask(ui.Image img, String wallHex) async {
-    final wallColor = HexColor.fromHex(wallHex);
-    final wR = wallColor.red, wG = wallColor.green, wB = wallColor.blue;
-
-    final imgByteData = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
-    final src = imgByteData!.buffer.asUint8List();
-
-    final mask = Uint8List(img.width * img.height * 4);
-    const threshold = 70;
-    final total = img.width * img.height;
-    for (int i = 0; i < total; i++) {
-      final b = i * 4;
-      final dist = ((src[b] - wR).abs() + (src[b + 1] - wG).abs() + (src[b + 2] - wB).abs()) ~/ 3;
-      final v = dist < threshold ? 255 : 0;
-      mask[b] = v; mask[b + 1] = v; mask[b + 2] = v; mask[b + 3] = 255;
-    }
-
-    final c = Completer<ui.Image>();
-    ui.decodeImageFromPixels(mask, img.width, img.height, ui.PixelFormat.rgba8888, c.complete);
-    final maskImg = await c.future;
-    final byteData = await maskImg.toByteData(format: ui.ImageByteFormat.png);
-    return base64Encode(byteData!.buffer.asUint8List());
-  }
-
   Widget _buildOriginalImage() {
-    // Image.file handles EXIF rotation automatically on iOS — no conversion needed
-    if (widget.imageFile != null) {
-      return Image.file(widget.imageFile!, fit: BoxFit.cover);
-    }
+    if (widget.imageFile != null) return Image.file(widget.imageFile!, fit: BoxFit.cover);
     final url = widget.originalImageUrl;
-    if (url.startsWith('/') || url.startsWith('file://')) {
-      return Image.file(File(url), fit: BoxFit.cover);
-    }
-    return CachedNetworkImage(
-      imageUrl: url,
-      fit: BoxFit.cover,
+    if (url.startsWith('/') || url.startsWith('file://')) return Image.file(File(url), fit: BoxFit.cover);
+    return CachedNetworkImage(imageUrl: url, fit: BoxFit.cover,
       placeholder: (_, __) => Container(color: AppColors.card),
-      errorWidget: (_, __, ___) => Container(color: AppColors.card),
-    );
-  }
-
-  Widget _buildRenderedImage(String url) {
-    return CachedNetworkImage(
-      imageUrl: url,
-      fit: BoxFit.cover,
-      placeholder: (_, __) => Container(color: AppColors.card),
-      errorWidget: (_, __, ___) => Container(color: AppColors.card),
-    );
+      errorWidget: (_, __, ___) => Container(color: AppColors.card));
   }
 
   Future<void> _saveToProject() async {
@@ -161,16 +156,13 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
     try {
       await SupabaseService().saveProject(
         projectName: widget.selectedColorName,
-        renderedImageUrl: _renderedUrl,
+        renderedImageUrl: null,
         selectedHex: widget.selectedHex,
       );
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Saved to projects!')),
-      );
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Saved!')));
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Save failed: $e'), backgroundColor: AppColors.error),
-      );
+        SnackBar(content: Text('Save failed: $e'), backgroundColor: AppColors.error));
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -178,15 +170,7 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
 
   Future<void> _shareImage() async {
     try {
-      Uint8List bytes;
-      final url = _renderedUrl ?? widget.originalImageUrl;
-      if (widget.imageFile != null && _renderedUrl == null) {
-        bytes = await widget.imageFile!.readAsBytes();
-      } else if (url.startsWith('/') || url.startsWith('file://')) {
-        bytes = await File(url).readAsBytes();
-      } else {
-        bytes = (await http.get(Uri.parse(url))).bodyBytes;
-      }
+      final bytes = _renderedBytes ?? await widget.imageFile!.readAsBytes();
       final temp = await getTemporaryDirectory();
       final file = File('${temp.path}/paintmatch_preview.png');
       await file.writeAsBytes(bytes);
@@ -197,7 +181,7 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   @override
   Widget build(BuildContext context) {
     final swatchColor = HexColor.fromHex(widget.selectedHex);
-    final hasRender = _renderedUrl != null;
+    final hasRender = _renderedBytes != null;
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -212,140 +196,150 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       ),
       body: Column(
         children: [
-          // Color chip
+          // Color chip + surface selector
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
             child: Row(
               children: [
-                Container(
-                  width: 26, height: 26,
-                  decoration: BoxDecoration(
-                    color: swatchColor,
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: AppColors.border),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Text(widget.selectedColorName,
-                    style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.w600, fontSize: 15)),
+                Container(width: 22, height: 22,
+                  decoration: BoxDecoration(color: swatchColor,
+                    borderRadius: BorderRadius.circular(5), border: Border.all(color: AppColors.border))),
                 const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: AppColors.card,
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: AppColors.border),
-                  ),
-                  child: Text(widget.selectedHex.toUpperCase(),
-                      style: const TextStyle(color: AppColors.textSecondary, fontSize: 11, fontFamily: 'monospace')),
-                ),
+                Expanded(child: Text(widget.selectedColorName,
+                    style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.w600, fontSize: 14),
+                    overflow: TextOverflow.ellipsis)),
+              ],
+            ),
+          ),
+
+          // Surface selector chips
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+            child: Row(
+              children: [
+                const Text('Paint:', style: TextStyle(color: AppColors.textSecondary, fontSize: 12)),
+                const SizedBox(width: 10),
+                ...[
+                  ('wall', Icons.format_paint),
+                  ('ceiling', Icons.roofing),
+                  ('floor', Icons.layers),
+                ].map((item) {
+                  final selected = _selectedSurface == item.$1;
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: GestureDetector(
+                      onTap: _rendering ? null : () {
+                        setState(() => _selectedSurface = item.$1);
+                        _runSegmentAndPaint(item.$1);
+                      },
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 150),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: selected ? AppColors.accentDim : AppColors.card,
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: selected ? AppColors.accent : AppColors.border,
+                            width: selected ? 1.5 : 1,
+                          ),
+                        ),
+                        child: Row(mainAxisSize: MainAxisSize.min, children: [
+                          Icon(item.$2, size: 13,
+                            color: selected ? AppColors.accent : AppColors.textSecondary),
+                          const SizedBox(width: 5),
+                          Text(item.$1[0].toUpperCase() + item.$1.substring(1),
+                            style: TextStyle(
+                              color: selected ? AppColors.accent : AppColors.textSecondary,
+                              fontSize: 12, fontWeight: selected ? FontWeight.w600 : FontWeight.normal)),
+                        ]),
+                      ),
+                    ),
+                  );
+                }),
               ],
             ),
           ),
 
           // Image area
           Expanded(
-            child: hasRender
-                ? Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      BeforeAfter(
-                        thumbColor: AppColors.accent,
-                        before: _buildOriginalImage(),
-                        after: _buildRenderedImage(_renderedUrl!),
-                      ),
-                      // Drag hint overlay
-                      Positioned(
-                        bottom: 16,
-                        left: 0, right: 0,
-                        child: Center(
-                          child: Container(
+            child: _rendering
+                ? Stack(fit: StackFit.expand, children: [
+                    _buildOriginalImage(),
+                    Container(color: Colors.black54),
+                    Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      const CircularProgressIndicator(color: AppColors.accent, strokeWidth: 2),
+                      const SizedBox(height: 16),
+                      Text(_renderStatus,
+                          style: const TextStyle(color: AppColors.textPrimary, fontSize: 14),
+                          textAlign: TextAlign.center),
+                    ])),
+                  ])
+                : hasRender
+                    ? Stack(children: [
+                        Positioned.fill(child: BeforeAfter(
+                          thumbColor: AppColors.accent,
+                          before: _buildOriginalImage(),
+                          after: Image.memory(_renderedBytes!, fit: BoxFit.cover),
+                        )),
+                        Positioned(bottom: 16, left: 0, right: 0,
+                          child: IgnorePointer(child: Center(child: Container(
                             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
                             decoration: BoxDecoration(
                               color: Colors.black.withValues(alpha: 0.55),
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: const Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(Icons.swap_horiz, color: Colors.white, size: 15),
-                                SizedBox(width: 6),
-                                Text('Drag to compare',
-                                    style: TextStyle(color: Colors.white, fontSize: 12)),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  )
-                : Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      _buildOriginalImage(),
-                      Container(color: Colors.black54),
-                      Center(
-                        child: Container(
-                          margin: const EdgeInsets.all(40),
-                          padding: const EdgeInsets.all(24),
-                          decoration: BoxDecoration(
-                            color: AppColors.card,
-                            borderRadius: BorderRadius.circular(16),
-                            border: Border.all(color: AppColors.border),
-                          ),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              if (_rendering)
-                                const CircularProgressIndicator(color: AppColors.accent, strokeWidth: 2),
-                              if (_rendering) const SizedBox(height: 16),
+                              borderRadius: BorderRadius.circular(20)),
+                            child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                              Icon(Icons.swap_horiz, color: Colors.white, size: 15),
+                              SizedBox(width: 6),
+                              Text('Drag to compare', style: TextStyle(color: Colors.white, fontSize: 12)),
+                            ]),
+                          )))),
+                      ])
+                    : Stack(fit: StackFit.expand, children: [
+                        _buildOriginalImage(),
+                        if (_renderStatus.isNotEmpty)
+                          Center(child: Container(
+                            margin: const EdgeInsets.all(40),
+                            padding: const EdgeInsets.all(20),
+                            decoration: BoxDecoration(
+                              color: AppColors.card, borderRadius: BorderRadius.circular(16),
+                              border: Border.all(color: AppColors.border)),
+                            child: Column(mainAxisSize: MainAxisSize.min, children: [
                               Text(_renderStatus,
-                                  style: const TextStyle(color: AppColors.textPrimary, fontSize: 14),
-                                  textAlign: TextAlign.center),
-                              if (!_rendering && _renderedUrl == null) ...[
-                                const SizedBox(height: 16),
-                                FilledButton(
-                                  onPressed: _triggerRender,
-                                  child: const Text('Retry'),
-                                ),
-                              ],
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
+                                style: const TextStyle(color: AppColors.textPrimary, fontSize: 13),
+                                textAlign: TextAlign.center),
+                              const SizedBox(height: 16),
+                              FilledButton(
+                                onPressed: () => _runSegmentAndPaint(_selectedSurface),
+                                child: const Text('Retry')),
+                            ]),
+                          )),
+                      ]),
           ),
 
           // Action bar
           Container(
             color: AppColors.bottomNav,
-            padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
-            child: Row(
-              children: [
-                OutlinedButton.icon(
-                  icon: const Icon(Icons.share_outlined, size: 18),
-                  label: const Text('Share'),
-                  onPressed: _shareImage,
-                  style: OutlinedButton.styleFrom(
-                    minimumSize: const Size(0, 48),
-                    padding: const EdgeInsets.symmetric(horizontal: 20),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: FilledButton.icon(
-                    icon: _saving
-                        ? const SizedBox(width: 16, height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
-                        : const Icon(Icons.bookmark_add_outlined, size: 18, color: Colors.black),
-                    label: const Text('Save to Project'),
-                    onPressed: _saving ? null : _saveToProject,
-                    style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
-                  ),
-                ),
-              ],
-            ),
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+            child: Row(children: [
+              OutlinedButton.icon(
+                icon: const Icon(Icons.share_outlined, size: 18),
+                label: const Text('Share'),
+                onPressed: _shareImage,
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size(0, 48),
+                  padding: const EdgeInsets.symmetric(horizontal: 20)),
+              ),
+              const SizedBox(width: 12),
+              Expanded(child: FilledButton.icon(
+                icon: _saving
+                    ? const SizedBox(width: 16, height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
+                    : const Icon(Icons.bookmark_add_outlined, size: 18, color: Colors.black),
+                label: const Text('Save to Project'),
+                onPressed: _saving ? null : _saveToProject,
+                style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
+              )),
+            ]),
           ),
         ],
       ),

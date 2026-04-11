@@ -80,6 +80,26 @@ class ApiService {
   }
 
   // -------------------------------------------------------------------------
+  // POST /segment-wall
+  // Returns base64 PNG mask — white = target surface, black = everything else
+  // surface: "wall" | "ceiling" | "floor"
+  // -------------------------------------------------------------------------
+  Future<String> segmentWall({
+    required String imageBase64,
+    String surface = 'wall',
+  }) async {
+    final uri = Uri.parse('$_base/segment-wall');
+    final response = await http.post(
+      uri,
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'image': imageBase64, 'surface': surface}),
+    );
+    final json = jsonDecode(response.body) as Map<String, dynamic>;
+    if (json['error'] != null) throw Exception(json['error']);
+    return (json['data'] as Map<String, dynamic>)['mask'] as String;
+  }
+
+  // -------------------------------------------------------------------------
   // POST /match-colors
   // -------------------------------------------------------------------------
   Future<List<PaintColor>> matchColors(String hex, {int topN = 3}) async {

@@ -20,10 +20,12 @@ app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024  # 20MB max upload
 from routes.analyze_room import analyze_room_bp
 from routes.render_room import render_room_bp
 from routes.match_colors import match_colors_bp
+from routes.segment_wall import segment_wall_bp
 
 app.register_blueprint(analyze_room_bp)
 app.register_blueprint(render_room_bp)
 app.register_blueprint(match_colors_bp)
+app.register_blueprint(segment_wall_bp)
 
 
 # ---------------------------------------------------------------------------
