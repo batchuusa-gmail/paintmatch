@@ -1,7 +1,7 @@
 """
 PM-11b: POST /segment-wall
-Runs nvidia/segformer-b0-finetuned-ade-512-512 locally via transformers.
-No external API — model is downloaded once and cached on startup.
+Primary: nvidia/segformer-b0-finetuned-ade-512-512 locally via transformers.
+Fallback: K-means color clustering + spatial heuristic if torch unavailable.
 Returns a base64 PNG mask — white = target surface, black = everything else.
 """
 import base64
@@ -24,9 +24,20 @@ ADE20K_LABELS = {
 
 # Lazy-loaded model — loaded once on first request
 _pipeline = None
+_torch_available = None
 
 def _get_pipeline():
-    global _pipeline
+    global _pipeline, _torch_available
+    if _torch_available is None:
+        try:
+            import torch  # noqa: F401
+            _torch_available = True
+        except ImportError:
+            _torch_available = False
+
+    if not _torch_available:
+        return None
+
     if _pipeline is None:
         from transformers import pipeline as hf_pipeline
         _pipeline = hf_pipeline(
@@ -35,6 +46,31 @@ def _get_pipeline():
             device=-1,  # CPU
         )
     return _pipeline
+
+
+def _kmeans_segment(pil: Image.Image, surface: str) -> Image.Image:
+    """Fallback: K-means color clustering + spatial heuristic."""
+    from sklearn.cluster import MiniBatchKMeans
+
+    size = (256, 256)
+    small = pil.resize(size, Image.BILINEAR)
+    arr = np.array(small).reshape(-1, 3).astype(np.float32)
+
+    k = min(8, len(arr))
+    km = MiniBatchKMeans(n_clusters=k, n_init=3, max_iter=50, random_state=0)
+    labels = km.fit_predict(arr).reshape(size[1], size[0])
+
+    h, w = size[1], size[0]
+    if surface == "wall":
+        roi = labels[h // 5: 4 * h // 5, w // 10: 9 * w // 10]
+    elif surface == "floor":
+        roi = labels[2 * h // 3:, :]
+    else:  # ceiling
+        roi = labels[:h // 5, :]
+
+    dominant = int(np.bincount(roi.flatten()).argmax())
+    mask_small = ((labels == dominant).astype(np.uint8) * 255)
+    return Image.fromarray(mask_small, mode="L").resize(pil.size, Image.NEAREST)
 
 
 def _combine_masks(segments: list, target_labels: set, orig_size: tuple) -> Image.Image:
@@ -88,19 +124,26 @@ def segment_wall():
     except Exception as e:
         return jsonify({"data": None, "error": f"Image processing failed: {e}"}), 500
 
-    # Run segmentation
-    try:
-        pipe = _get_pipeline()
-        segments = pipe(pil)  # returns list of {label, score, mask (PIL Image)}
-    except Exception as e:
-        return jsonify({"data": None, "error": f"Segmentation failed: {e}"}), 502
+    # Run segmentation — try AI pipeline, fall back to K-means
+    used_fallback = False
+    pipe = _get_pipeline()
+    if pipe is not None:
+        try:
+            segments = pipe(pil)  # returns list of {label, score, mask (PIL Image)}
+            if not segments:
+                raise ValueError("No segments returned")
+            combined = _combine_masks(segments, target_labels, orig_size)
+        except Exception as e:
+            # AI failed — fall back
+            print(f"[segment-wall] AI pipeline failed ({e}), using K-means fallback")
+            combined = _kmeans_segment(pil, surface_param)
+            used_fallback = True
+    else:
+        combined = _kmeans_segment(pil, surface_param)
+        used_fallback = True
 
-    if not segments:
-        return jsonify({"data": None, "error": "No segments returned"}), 502
-
-    # Build + clean mask
-    combined = _combine_masks(segments, target_labels, orig_size)
     cleaned = _clean_mask(combined)
+    segments = [] if used_fallback else segments
 
     out_buf = io.BytesIO()
     cleaned.save(out_buf, format="PNG")
@@ -115,6 +158,7 @@ def segment_wall():
             "surface": surface_param,
             "coverage": round(coverage, 3),
             "segments_found": [s.get("label") for s in segments],
+            "method": "kmeans_fallback" if used_fallback else "segformer",
         },
         "error": None,
     })

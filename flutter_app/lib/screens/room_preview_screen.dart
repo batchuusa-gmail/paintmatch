@@ -1,93 +1,79 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:before_after/before_after.dart';
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../config/app_theme.dart';
+import '../models/paint_color.dart';
 import '../services/api_service.dart';
 import '../services/supabase_service.dart';
 import '../utils/color_ext.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Isolate payload — everything compute() needs (no ui.Image allowed across isolates)
+// Surface definitions
+// ─────────────────────────────────────────────────────────────────────────────
+class _Surface {
+  final String id;      // matches ADE20K label sent to backend
+  final String label;
+  final IconData icon;
+  const _Surface(this.id, this.label, this.icon);
+}
+
+const _surfaces = [
+  _Surface('wall',    'Walls',    Icons.format_paint),
+  _Surface('ceiling', 'Ceiling',  Icons.roofing),
+  _Surface('floor',   'Floor',    Icons.layers),
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Isolate blend payload
 // ─────────────────────────────────────────────────────────────────────────────
 class _BlendParams {
   final Uint8List srcRgba;
-  final int srcW;
-  final int srcH;
+  final int srcW, srcH;
   final Uint8List maskRgba;
-  final int maskW;
-  final int maskH;
-  final int tR;
-  final int tG;
-  final int tB;
-
+  final int maskW, maskH;
+  final int tR, tG, tB;
   const _BlendParams({
-    required this.srcRgba,
-    required this.srcW,
-    required this.srcH,
-    required this.maskRgba,
-    required this.maskW,
-    required this.maskH,
-    required this.tR,
-    required this.tG,
-    required this.tB,
+    required this.srcRgba, required this.srcW, required this.srcH,
+    required this.maskRgba, required this.maskW, required this.maskH,
+    required this.tR, required this.tG, required this.tB,
   });
 }
 
-/// Runs in an isolate — no Flutter UI access.
-/// Overlay blend: preserves luminance texture, applies target hue.
 Uint8List _blendIsolate(_BlendParams p) {
   final src = p.srcRgba;
   final mask = p.maskRgba;
   final out = Uint8List.fromList(src);
-
   final total = p.srcW * p.srcH;
   for (int i = 0; i < total; i++) {
     final sb = i * 4;
-
-    // Bilinear-nearest mask lookup — correct even when mask != src size
     final mx = ((i % p.srcW) * p.maskW / p.srcW).round().clamp(0, p.maskW - 1);
     final my = ((i ~/ p.srcW) * p.maskH / p.srcH).round().clamp(0, p.maskH - 1);
-    final maskVal = mask[(my * p.maskW + mx) * 4]; // R channel
-
-    if (maskVal <= 127) continue;
-
-    final r = src[sb] / 255.0;
-    final g = src[sb + 1] / 255.0;
-    final b = src[sb + 2] / 255.0;
-    final tR = p.tR / 255.0;
-    final tG = p.tG / 255.0;
-    final tB = p.tB / 255.0;
-
-    // Overlay blend: preserves wall texture (shadows/highlights), applies color
-    // Formula: if base < 0.5 → 2*base*blend, else → 1 - 2*(1-base)*(1-blend)
-    double ovR = r < 0.5 ? 2 * r * tR : 1 - 2 * (1 - r) * (1 - tR);
-    double ovG = g < 0.5 ? 2 * g * tG : 1 - 2 * (1 - g) * (1 - tG);
-    double ovB = b < 0.5 ? 2 * b * tB : 1 - 2 * (1 - b) * (1 - tB);
-
-    // Blend 80% overlay result with 20% original (keeps some texture detail)
-    const strength = 0.80;
-    out[sb]     = ((ovR * strength + r * (1 - strength)) * 255).round().clamp(0, 255);
-    out[sb + 1] = ((ovG * strength + g * (1 - strength)) * 255).round().clamp(0, 255);
-    out[sb + 2] = ((ovB * strength + b * (1 - strength)) * 255).round().clamp(0, 255);
+    if (mask[(my * p.maskW + mx) * 4] <= 127) continue;
+    final r = src[sb] / 255.0, g = src[sb+1] / 255.0, b = src[sb+2] / 255.0;
+    final tR = p.tR / 255.0, tG = p.tG / 255.0, tB = p.tB / 255.0;
+    // Overlay blend — preserves texture/shadows
+    double ovR = r < 0.5 ? 2*r*tR : 1-2*(1-r)*(1-tR);
+    double ovG = g < 0.5 ? 2*g*tG : 1-2*(1-g)*(1-tG);
+    double ovB = b < 0.5 ? 2*b*tB : 1-2*(1-b)*(1-tB);
+    const s = 0.80;
+    out[sb]   = ((ovR*s + r*(1-s))*255).round().clamp(0, 255);
+    out[sb+1] = ((ovG*s + g*(1-s))*255).round().clamp(0, 255);
+    out[sb+2] = ((ovB*s + b*(1-s))*255).round().clamp(0, 255);
   }
-
   return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Screen
+// Widget
 // ─────────────────────────────────────────────────────────────────────────────
 class RoomPreviewScreen extends StatefulWidget {
   final String originalImageUrl;
@@ -112,13 +98,18 @@ class RoomPreviewScreen extends StatefulWidget {
 }
 
 class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
+  // State
   bool _saving = false;
   bool _rendering = false;
   String _renderStatus = '';
+  String _environment = 'interior'; // interior | exterior
+  String _selectedSurface = 'wall';
 
-  // Multi-surface selection
-  final Set<String> _selectedSurfaces = {'wall'};
+  // Selected color — starts from widget.selectedHex
+  late String _selectedHex;
+  late String _selectedColorName;
 
+  // Image data
   ui.Image? _srcImage;
   Uint8List? _srcRgba;
   Uint8List? _srcJpeg;
@@ -127,104 +118,88 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   @override
   void initState() {
     super.initState();
-    _loadAndRender();
+    _selectedHex = widget.selectedHex;
+    _selectedColorName = widget.selectedColorName;
+    _loadImage();
   }
 
-  Future<void> _loadAndRender() async {
-    setState(() { _rendering = true; _renderStatus = 'Loading image…'; });
+  Future<void> _loadImage() async {
+    if (widget.imageFile == null) return;
+    setState(() { _rendering = true; _renderStatus = 'Loading…'; });
     try {
       final rawBytes = await widget.imageFile!.readAsBytes();
       _srcJpeg = rawBytes;
-
       final codec = await ui.instantiateImageCodec(rawBytes);
       final frame = await codec.getNextFrame();
       final img = frame.image;
-      final byteData = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
+      final bd = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
       _srcImage = img;
-      _srcRgba = byteData!.buffer.asUint8List();
-
-      await _runSegmentAndPaint();
+      _srcRgba = bd!.buffer.asUint8List();
+      await _paint();
     } catch (e) {
       if (mounted) setState(() { _rendering = false; _renderStatus = 'Failed: $e'; });
     }
   }
 
-  Future<void> _runSegmentAndPaint() async {
+  Future<void> _paint() async {
     if (_srcImage == null || _srcRgba == null || _srcJpeg == null) return;
-    final surfaceLabel = _selectedSurfaces.join(',');
-    setState(() { _rendering = true; _renderedBytes = null; _renderStatus = 'Detecting ${_selectedSurfaces.join(' + ')}…'; });
-
+    setState(() { _rendering = true; _renderedBytes = null; _renderStatus = 'Detecting $_selectedSurface…'; });
     try {
-      // 1. AI segmentation — returns clean binary mask PNG at orig resolution
-      final imageBase64 = base64Encode(_srcJpeg!);
       final maskBase64 = await ApiService().segmentWall(
-        imageBase64: imageBase64,
-        surface: surfaceLabel,
+        imageBase64: base64Encode(_srcJpeg!),
+        surface: _selectedSurface,
       );
-
       setState(() => _renderStatus = 'Painting…');
-
-      // 2. Decode mask
       final maskBytes = base64Decode(maskBase64);
       final maskCodec = await ui.instantiateImageCodec(maskBytes);
       final maskFrame = await maskCodec.getNextFrame();
       final maskImg = maskFrame.image;
-      final maskByteData = await maskImg.toByteData(format: ui.ImageByteFormat.rawRgba);
-      final maskRgba = maskByteData!.buffer.asUint8List();
+      final maskBd = await maskImg.toByteData(format: ui.ImageByteFormat.rawRgba);
 
-      // 3. Blend in isolate (Priority 2: compute() — no UI thread blocking)
-      final target = HexColor.fromHex(widget.selectedHex);
-      final params = _BlendParams(
-        srcRgba: _srcRgba!,
-        srcW: _srcImage!.width,
-        srcH: _srcImage!.height,
-        maskRgba: maskRgba,
-        maskW: maskImg.width,
-        maskH: maskImg.height,
-        tR: target.red,
-        tG: target.green,
-        tB: target.blue,
-      );
+      final target = HexColor.fromHex(_selectedHex);
+      final out = await compute(_blendIsolate, _BlendParams(
+        srcRgba: _srcRgba!, srcW: _srcImage!.width, srcH: _srcImage!.height,
+        maskRgba: maskBd!.buffer.asUint8List(), maskW: maskImg.width, maskH: maskImg.height,
+        tR: (target.r * 255).round(),
+        tG: (target.g * 255).round(),
+        tB: (target.b * 255).round(),
+      ));
 
-      final out = await compute(_blendIsolate, params);
-
-      // 4. Encode result as PNG (back on main isolate — ui.* only works here)
       final c = Completer<ui.Image>();
-      ui.decodeImageFromPixels(
-        out, _srcImage!.width, _srcImage!.height,
-        ui.PixelFormat.rgba8888, c.complete,
-      );
+      ui.decodeImageFromPixels(out, _srcImage!.width, _srcImage!.height, ui.PixelFormat.rgba8888, c.complete);
       final rendered = await c.future;
-      final bd = await rendered.toByteData(format: ui.ImageByteFormat.png);
-
-      if (mounted) setState(() => _renderedBytes = bd!.buffer.asUint8List());
+      final renderBd = await rendered.toByteData(format: ui.ImageByteFormat.png);
+      if (mounted) setState(() => _renderedBytes = renderBd!.buffer.asUint8List());
     } catch (e, s) {
       debugPrint('[Render] $e\n$s');
-      if (mounted) setState(() => _renderStatus = 'Failed: $e');
+      if (mounted) setState(() => _renderStatus = 'Segmentation failed.\nCheck Railway logs.');
     } finally {
       if (mounted) setState(() => _rendering = false);
     }
   }
 
-  void _toggleSurface(String surface) {
-    if (_rendering) return;
-    setState(() {
-      if (_selectedSurfaces.contains(surface)) {
-        if (_selectedSurfaces.length > 1) _selectedSurfaces.remove(surface);
-      } else {
-        _selectedSurfaces.add(surface);
-      }
-    });
-    _runSegmentAndPaint();
+  void _openColorPicker() async {
+    final result = await showModalBottomSheet<Map<String, String>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _ColorPickerSheet(
+        currentHex: _selectedHex,
+        currentName: _selectedColorName,
+      ),
+    );
+    if (result != null && mounted) {
+      setState(() {
+        _selectedHex = result['hex']!;
+        _selectedColorName = result['name']!;
+      });
+      _paint();
+    }
   }
 
   Widget _buildOriginalImage() {
     if (widget.imageFile != null) return Image.file(widget.imageFile!, fit: BoxFit.cover);
-    final url = widget.originalImageUrl;
-    if (url.startsWith('/') || url.startsWith('file://')) return Image.file(File(url), fit: BoxFit.cover);
-    return CachedNetworkImage(imageUrl: url, fit: BoxFit.cover,
-      placeholder: (_, __) => Container(color: AppColors.card),
-      errorWidget: (_, __, ___) => Container(color: AppColors.card));
+    return const SizedBox.shrink();
   }
 
   Future<void> _saveToProject() async {
@@ -232,9 +207,9 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
     setState(() => _saving = true);
     try {
       await SupabaseService().saveProject(
-        projectName: widget.selectedColorName,
+        projectName: _selectedColorName,
         renderedImageUrl: null,
-        selectedHex: widget.selectedHex,
+        selectedHex: _selectedHex,
       );
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Saved!')));
     } catch (e) {
@@ -245,20 +220,20 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
     }
   }
 
-  Future<void> _shareImage() async {
+  Future<void> _share() async {
     try {
       final bytes = _renderedBytes ?? await widget.imageFile!.readAsBytes();
       final temp = await getTemporaryDirectory();
       final file = File('${temp.path}/paintmatch_preview.png');
       await file.writeAsBytes(bytes);
-      await Share.shareXFiles([XFile(file.path)], text: 'My room in ${widget.selectedColorName} via PaintMatch');
+      await Share.shareXFiles([XFile(file.path)], text: 'My room in $_selectedColorName via PaintMatch');
     } catch (_) {}
   }
 
   @override
   Widget build(BuildContext context) {
-    final swatchColor = HexColor.fromHex(widget.selectedHex);
-    final hasRender = _renderedBytes != null;
+    final screenH = MediaQuery.of(context).size.height;
+    final swatchColor = HexColor.fromHex(_selectedHex);
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -268,99 +243,49 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
           icon: const Icon(Icons.arrow_back_ios, color: AppColors.textPrimary, size: 18),
           onPressed: () => context.pop(),
         ),
-        title: Text('Room Preview',
+        title: Text('Preview',
             style: GoogleFonts.playfairDisplay(color: AppColors.textPrimary, fontWeight: FontWeight.w600)),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.share_outlined, color: AppColors.textSecondary),
+            onPressed: _share,
+          ),
+        ],
       ),
       body: Column(
         children: [
-          // Color chip
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
-            child: Row(children: [
-              Container(width: 22, height: 22,
-                decoration: BoxDecoration(color: swatchColor,
-                  borderRadius: BorderRadius.circular(5), border: Border.all(color: AppColors.border))),
-              const SizedBox(width: 8),
-              Expanded(child: Text(widget.selectedColorName,
-                style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.w600, fontSize: 14),
-                overflow: TextOverflow.ellipsis)),
-            ]),
-          ),
-
-          // Multi-surface selector (Priority 5)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
-            child: Row(children: [
-              const Text('Paint:', style: TextStyle(color: AppColors.textSecondary, fontSize: 12)),
-              const SizedBox(width: 10),
-              ...[
-                ('wall',    Icons.format_paint, 'Wall'),
-                ('ceiling', Icons.roofing,      'Ceiling'),
-                ('floor',   Icons.layers,       'Floor'),
-              ].map((item) {
-                final selected = _selectedSurfaces.contains(item.$1);
-                return Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: GestureDetector(
-                    onTap: () => _toggleSurface(item.$1),
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 150),
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: selected ? AppColors.accentDim : AppColors.card,
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(
-                          color: selected ? AppColors.accent : AppColors.border,
-                          width: selected ? 1.5 : 1),
-                      ),
-                      child: Row(mainAxisSize: MainAxisSize.min, children: [
-                        Icon(item.$2, size: 13,
-                          color: selected ? AppColors.accent : AppColors.textSecondary),
-                        const SizedBox(width: 5),
-                        Text(item.$3,
-                          style: TextStyle(
-                            color: selected ? AppColors.accent : AppColors.textSecondary,
-                            fontSize: 12,
-                            fontWeight: selected ? FontWeight.w600 : FontWeight.normal)),
-                      ]),
-                    ),
-                  ),
-                );
-              }),
-            ]),
-          ),
-
-          // Image area
-          Expanded(
+          // ── Room image preview (40% height) ──────────────────────────────
+          SizedBox(
+            height: screenH * 0.38,
             child: _rendering
                 ? Stack(fit: StackFit.expand, children: [
                     _buildOriginalImage(),
                     Container(color: Colors.black54),
                     Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
                       const CircularProgressIndicator(color: AppColors.accent, strokeWidth: 2),
-                      const SizedBox(height: 16),
+                      const SizedBox(height: 12),
                       Text(_renderStatus,
-                        style: const TextStyle(color: AppColors.textPrimary, fontSize: 14),
-                        textAlign: TextAlign.center),
+                          style: const TextStyle(color: Colors.white, fontSize: 13),
+                          textAlign: TextAlign.center),
                     ])),
                   ])
-                : hasRender
+                : _renderedBytes != null
                     ? Stack(children: [
                         Positioned.fill(child: BeforeAfter(
                           thumbColor: AppColors.accent,
                           before: _buildOriginalImage(),
                           after: Image.memory(_renderedBytes!, fit: BoxFit.cover),
                         )),
-                        Positioned(bottom: 16, left: 0, right: 0,
+                        Positioned(bottom: 10, left: 0, right: 0,
                           child: IgnorePointer(child: Center(child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
                             decoration: BoxDecoration(
-                              color: Colors.black.withValues(alpha: 0.55),
-                              borderRadius: BorderRadius.circular(20)),
+                              color: Colors.black54,
+                              borderRadius: BorderRadius.circular(16)),
                             child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                              Icon(Icons.swap_horiz, color: Colors.white, size: 15),
-                              SizedBox(width: 6),
-                              Text('Drag to compare', style: TextStyle(color: Colors.white, fontSize: 12)),
+                              Icon(Icons.swap_horiz, color: Colors.white, size: 13),
+                              SizedBox(width: 5),
+                              Text('Drag to compare', style: TextStyle(color: Colors.white, fontSize: 11)),
                             ]),
                           )))),
                       ])
@@ -368,50 +293,427 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                         _buildOriginalImage(),
                         if (_renderStatus.isNotEmpty)
                           Center(child: Container(
-                            margin: const EdgeInsets.all(40),
-                            padding: const EdgeInsets.all(20),
+                            margin: const EdgeInsets.all(20),
+                            padding: const EdgeInsets.all(16),
                             decoration: BoxDecoration(
-                              color: AppColors.card, borderRadius: BorderRadius.circular(16),
+                              color: AppColors.card,
+                              borderRadius: BorderRadius.circular(12),
                               border: Border.all(color: AppColors.border)),
                             child: Column(mainAxisSize: MainAxisSize.min, children: [
                               Text(_renderStatus,
-                                style: const TextStyle(color: AppColors.textPrimary, fontSize: 13),
+                                style: const TextStyle(color: AppColors.textPrimary, fontSize: 12),
                                 textAlign: TextAlign.center),
-                              const SizedBox(height: 16),
-                              FilledButton(
-                                onPressed: _runSegmentAndPaint,
-                                child: const Text('Retry')),
+                              const SizedBox(height: 12),
+                              FilledButton(onPressed: _paint, child: const Text('Retry')),
                             ]),
                           )),
                       ]),
           ),
 
-          // Action bar
+          // ── Controls panel ───────────────────────────────────────────────
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+
+                  // Environment row
+                  const Text('Environment',
+                      style: TextStyle(color: AppColors.textSecondary, fontSize: 11,
+                          fontWeight: FontWeight.w600, letterSpacing: 0.8)),
+                  const SizedBox(height: 10),
+                  Row(children: [
+                    _EnvChip(
+                      icon: Icons.home_outlined,
+                      label: 'Interior',
+                      selected: _environment == 'interior',
+                      onTap: () => setState(() => _environment = 'interior'),
+                    ),
+                    const SizedBox(width: 10),
+                    _EnvChip(
+                      icon: Icons.location_city_outlined,
+                      label: 'Exterior',
+                      selected: _environment == 'exterior',
+                      onTap: () => setState(() => _environment = 'exterior'),
+                    ),
+                  ]),
+
+                  const SizedBox(height: 24),
+
+                  // What to Paint
+                  const Text('What to Paint',
+                      style: TextStyle(color: AppColors.textSecondary, fontSize: 11,
+                          fontWeight: FontWeight.w600, letterSpacing: 0.8)),
+                  const SizedBox(height: 10),
+                  Row(children: _surfaces.map((s) {
+                    final sel = _selectedSurface == s.id;
+                    return Padding(
+                      padding: const EdgeInsets.only(right: 10),
+                      child: GestureDetector(
+                        onTap: _rendering ? null : () {
+                          setState(() => _selectedSurface = s.id);
+                          _paint();
+                        },
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 150),
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                          decoration: BoxDecoration(
+                            color: sel ? AppColors.accentDim : AppColors.card,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: sel ? AppColors.accent : AppColors.border,
+                              width: sel ? 1.5 : 1),
+                          ),
+                          child: Column(children: [
+                            Icon(s.icon, size: 20,
+                                color: sel ? AppColors.accent : AppColors.textSecondary),
+                            const SizedBox(height: 4),
+                            Text(s.label,
+                                style: TextStyle(
+                                  color: sel ? AppColors.accent : AppColors.textSecondary,
+                                  fontSize: 11,
+                                  fontWeight: sel ? FontWeight.w600 : FontWeight.normal)),
+                          ]),
+                        ),
+                      ),
+                    );
+                  }).toList()),
+
+                  const SizedBox(height: 24),
+
+                  // Selected color row
+                  const Text('Color',
+                      style: TextStyle(color: AppColors.textSecondary, fontSize: 11,
+                          fontWeight: FontWeight.w600, letterSpacing: 0.8)),
+                  const SizedBox(height: 10),
+                  GestureDetector(
+                    onTap: _openColorPicker,
+                    child: Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: AppColors.card,
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: AppColors.border),
+                      ),
+                      child: Row(children: [
+                        Container(
+                          width: 44, height: 44,
+                          decoration: BoxDecoration(
+                            color: swatchColor,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: AppColors.border),
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(_selectedColorName,
+                                style: const TextStyle(color: AppColors.textPrimary,
+                                    fontWeight: FontWeight.w600, fontSize: 15)),
+                            const SizedBox(height: 3),
+                            Text(_selectedHex.toUpperCase(),
+                                style: const TextStyle(color: AppColors.textSecondary,
+                                    fontSize: 12, fontFamily: 'monospace')),
+                          ],
+                        )),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: AppColors.accent,
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: const Text('Select Color',
+                              style: TextStyle(color: Colors.black,
+                                  fontSize: 12, fontWeight: FontWeight.w700)),
+                        ),
+                      ]),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          // ── Bottom action bar ─────────────────────────────────────────────
           Container(
             color: AppColors.bottomNav,
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
-            child: Row(children: [
-              OutlinedButton.icon(
-                icon: const Icon(Icons.share_outlined, size: 18),
-                label: const Text('Share'),
-                onPressed: _shareImage,
-                style: OutlinedButton.styleFrom(
-                  minimumSize: const Size(0, 48),
-                  padding: const EdgeInsets.symmetric(horizontal: 20)),
-              ),
-              const SizedBox(width: 12),
-              Expanded(child: FilledButton.icon(
-                icon: _saving
-                    ? const SizedBox(width: 16, height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
-                    : const Icon(Icons.bookmark_add_outlined, size: 18, color: Colors.black),
-                label: const Text('Save to Project'),
-                onPressed: _saving ? null : _saveToProject,
-                style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
-              )),
-            ]),
+            child: FilledButton.icon(
+              icon: _saving
+                  ? const SizedBox(width: 16, height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
+                  : const Icon(Icons.bookmark_add_outlined, size: 18, color: Colors.black),
+              label: const Text('Save to Project'),
+              onPressed: _saving ? null : _saveToProject,
+              style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
+            ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Environment chip
+// ─────────────────────────────────────────────────────────────────────────────
+class _EnvChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  const _EnvChip({required this.icon, required this.label, required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+        decoration: BoxDecoration(
+          color: selected ? AppColors.accent : AppColors.card,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: selected ? AppColors.accent : AppColors.border),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 16, color: selected ? Colors.black : AppColors.textSecondary),
+          const SizedBox(width: 6),
+          Text(label, style: TextStyle(
+            color: selected ? Colors.black : AppColors.textSecondary,
+            fontSize: 13, fontWeight: selected ? FontWeight.w700 : FontWeight.normal)),
+        ]),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Color Picker Bottom Sheet
+// ─────────────────────────────────────────────────────────────────────────────
+class _ColorPickerSheet extends StatefulWidget {
+  final String currentHex;
+  final String currentName;
+  const _ColorPickerSheet({required this.currentHex, required this.currentName});
+
+  @override
+  State<_ColorPickerSheet> createState() => _ColorPickerSheetState();
+}
+
+class _ColorPickerSheetState extends State<_ColorPickerSheet> {
+  final _searchCtrl = TextEditingController();
+  Timer? _debounce;
+  String _vendorFilter = 'all';
+  List<PaintColor> _filtered = [];
+  bool _loading = true;
+  String? _selectedHex;
+  String? _selectedName;
+
+  static const _vendors = [
+    ('all', 'All'),
+    ('sherwin_williams', 'Sherwin-Williams'),
+    ('benjamin_moore', 'Benjamin Moore'),
+    ('behr', 'Behr'),
+    ('ppg', 'PPG'),
+    ('valspar', 'Valspar'),
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedHex = widget.currentHex;
+    _selectedName = widget.currentName;
+    _loadColors();
+    _searchCtrl.addListener(_filter);
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadColors() async {
+    setState(() => _loading = true);
+    try {
+      final colors = await ApiService().listColors(
+        vendor: _vendorFilter == 'all' ? null : _vendorFilter,
+        search: _searchCtrl.text.trim().isEmpty ? null : _searchCtrl.text.trim(),
+        limit: 200,
+      );
+      if (mounted) {
+        setState(() { _filtered = colors; _loading = false; });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  void _filter() {
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 400), _loadColors);
+  }
+
+  void _selectVendor(String v) {
+    setState(() => _vendorFilter = v);
+    _loadColors();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      initialChildSize: 0.85,
+      minChildSize: 0.5,
+      maxChildSize: 0.95,
+      builder: (_, scrollCtrl) => Container(
+        decoration: const BoxDecoration(
+          color: AppColors.card,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          children: [
+            // Handle
+            Container(
+              margin: const EdgeInsets.only(top: 12),
+              width: 40, height: 4,
+              decoration: BoxDecoration(
+                color: AppColors.border,
+                borderRadius: BorderRadius.circular(2)),
+            ),
+            // Header
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+              child: Row(children: [
+                Text('Select Color',
+                    style: GoogleFonts.playfairDisplay(
+                        color: AppColors.textPrimary, fontSize: 20, fontWeight: FontWeight.w600)),
+                const Spacer(),
+                TextButton(
+                  onPressed: () => Navigator.pop(context,
+                      _selectedHex != null ? {'hex': _selectedHex!, 'name': _selectedName!} : null),
+                  child: const Text('Apply',
+                      style: TextStyle(color: AppColors.accent, fontWeight: FontWeight.w700)),
+                ),
+              ]),
+            ),
+            // Search
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+              child: TextField(
+                controller: _searchCtrl,
+                style: const TextStyle(color: AppColors.textPrimary),
+                decoration: InputDecoration(
+                  hintText: 'Search paint color names…',
+                  hintStyle: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
+                  prefixIcon: const Icon(Icons.search, color: AppColors.textSecondary, size: 18),
+                  filled: true,
+                  fillColor: AppColors.background,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: AppColors.border)),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: AppColors.border)),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: AppColors.accent)),
+                  contentPadding: const EdgeInsets.symmetric(vertical: 10),
+                ),
+              ),
+            ),
+            // Vendor filter tabs
+            SizedBox(
+              height: 44,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
+                itemCount: _vendors.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                itemBuilder: (_, i) {
+                  final v = _vendors[i];
+                  final sel = _vendorFilter == v.$1;
+                  return GestureDetector(
+                    onTap: () => _selectVendor(v.$1),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: sel ? AppColors.accent : AppColors.background,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: sel ? AppColors.accent : AppColors.border)),
+                      child: Text(v.$2,
+                          style: TextStyle(
+                            color: sel ? Colors.black : AppColors.textSecondary,
+                            fontSize: 12, fontWeight: sel ? FontWeight.w700 : FontWeight.normal)),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 12),
+            // Color grid
+            Expanded(
+              child: _loading
+                  ? const Center(child: CircularProgressIndicator(color: AppColors.accent))
+                  : _filtered.isEmpty
+                      ? const Center(child: Text('No colors found',
+                          style: TextStyle(color: AppColors.textSecondary)))
+                      : GridView.builder(
+                          controller: scrollCtrl,
+                          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+                          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 3,
+                            mainAxisSpacing: 12,
+                            crossAxisSpacing: 12,
+                            childAspectRatio: 0.8,
+                          ),
+                          itemCount: _filtered.length,
+                          itemBuilder: (_, i) {
+                            final c = _filtered[i];
+                            final sel = _selectedHex == c.hex;
+                            return GestureDetector(
+                              onTap: () => setState(() {
+                                _selectedHex = c.hex;
+                                _selectedName = c.colorName;
+                              }),
+                              child: Column(children: [
+                                Expanded(
+                                  child: AnimatedContainer(
+                                    duration: const Duration(milliseconds: 150),
+                                    decoration: BoxDecoration(
+                                      color: HexColor.fromHex(c.hex),
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(
+                                        color: sel ? AppColors.accent : AppColors.border,
+                                        width: sel ? 2.5 : 1),
+                                      boxShadow: sel ? [BoxShadow(
+                                        color: AppColors.accent.withValues(alpha: 0.4),
+                                        blurRadius: 8, spreadRadius: 1)] : null,
+                                    ),
+                                    child: sel
+                                        ? const Center(child: Icon(Icons.check, color: Colors.white, size: 20))
+                                        : null,
+                                  ),
+                                ),
+                                const SizedBox(height: 5),
+                                Text(c.colorName,
+                                    style: const TextStyle(color: AppColors.textPrimary,
+                                        fontSize: 10, fontWeight: FontWeight.w500),
+                                    maxLines: 1, overflow: TextOverflow.ellipsis,
+                                    textAlign: TextAlign.center),
+                                Text(c.colorCode,
+                                    style: const TextStyle(color: AppColors.textSecondary, fontSize: 9),
+                                    maxLines: 1, overflow: TextOverflow.ellipsis,
+                                    textAlign: TextAlign.center),
+                              ]),
+                            );
+                          },
+                        ),
+            ),
+          ],
+        ),
       ),
     );
   }

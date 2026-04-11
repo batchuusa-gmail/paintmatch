@@ -72,6 +72,45 @@ def match_colors():
         return jsonify({"data": None, "error": str(e)}), 500
 
 
+@match_colors_bp.route("/colors", methods=["GET"])
+def list_colors():
+    """Return all paint colors with optional vendor/search filtering."""
+    vendor = request.args.get("vendor", "").strip().lower()
+    search = request.args.get("search", "").strip().lower()
+    limit = int(request.args.get("limit", 200))
+    offset = int(request.args.get("offset", 0))
+
+    try:
+        all_colors = _load_all_colors()
+        filtered = all_colors
+
+        if vendor:
+            filtered = [c for c in filtered if c.get("vendor", "").lower() == vendor]
+        if search:
+            filtered = [c for c in filtered
+                        if search in c.get("color_name", "").lower()
+                        or search in c.get("color_code", "").lower()]
+
+        total = len(filtered)
+        page = filtered[offset: offset + limit]
+
+        result = [{
+            "vendor": c.get("vendor"),
+            "color_name": c.get("color_name"),
+            "color_code": c.get("color_code"),
+            "hex": c.get("hex"),
+            "lrv": c.get("lrv"),
+            "price_per_gallon": c.get("price_per_gallon"),
+            "coverage_sqft": c.get("coverage_sqft"),
+            "finish_options": c.get("finish_options", []),
+        } for c in page]
+
+        return jsonify({"data": result, "total": total, "error": None})
+
+    except Exception as e:
+        return jsonify({"data": None, "total": 0, "error": str(e)}), 500
+
+
 @match_colors_bp.route("/match-colors/refresh-cache", methods=["POST"])
 def refresh_cache():
     """Force-reload the in-memory color cache (call after seeding)."""

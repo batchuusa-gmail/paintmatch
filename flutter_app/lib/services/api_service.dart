@@ -100,6 +100,26 @@ class ApiService {
   }
 
   // -------------------------------------------------------------------------
+  // GET /colors — all colors, optional vendor/search filter
+  // -------------------------------------------------------------------------
+  Future<List<PaintColor>> listColors({
+    String? vendor,
+    String? search,
+    int limit = 200,
+    int offset = 0,
+  }) async {
+    final params = <String, String>{'limit': '$limit', 'offset': '$offset'};
+    if (vendor != null && vendor != 'all') params['vendor'] = vendor;
+    if (search != null && search.isNotEmpty) params['search'] = search;
+    final uri = Uri.parse('$_base/colors').replace(queryParameters: params);
+    final response = await http.get(uri);
+    final json = jsonDecode(response.body) as Map<String, dynamic>;
+    if (json['error'] != null) throw Exception(json['error']);
+    final list = json['data'] as List<dynamic>;
+    return list.map((e) => PaintColor.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  // -------------------------------------------------------------------------
   // POST /match-colors
   // -------------------------------------------------------------------------
   Future<List<PaintColor>> matchColors(String hex, {int topN = 3}) async {

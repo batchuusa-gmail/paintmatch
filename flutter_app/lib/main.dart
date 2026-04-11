@@ -47,6 +47,7 @@ final GoRouter _router = GoRouter(
         selectedHex: args['selectedHex'],
         selectedColorName: args['selectedColorName'],
         imageFile: args['imageFile'],
+        wallHex: args['wallHex'] as String?,
       );
     }),
     GoRoute(path: '/projects', builder: (_, __) => const AuthWrapper(

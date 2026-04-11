@@ -161,6 +161,7 @@ class _PaletteSuggestionsScreenState extends State<PaletteSuggestionsScreen> {
                   'selectedHex': _selected.hex,
                   'selectedColorName': _selected.name,
                   'imageFile': widget.imageFile,
+                  'wallHex': widget.analysis.wallHex,
                   'finish': 'eggshell',
                 }),
               ),
