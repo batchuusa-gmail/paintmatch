@@ -82,34 +82,36 @@ def _sam_segment(pil: Image.Image, seed_x: float, seed_y: float) -> Image.Image:
     tx = int(seed_x * ww)
     ty = int(seed_y * wh)
 
-    best_mask_pil = None
-    best_area     = None
+    # Download all masks, find ones that cover the tap point
+    candidates = []   # (area, mask_pil)
+    all_masks  = []   # (area, mask_pil) — for centroid fallback
 
     for mask_url in individual_masks:
         resp = req.get(str(mask_url), timeout=30)
         resp.raise_for_status()
         m = Image.open(io.BytesIO(resp.content)).convert("L")
-        # Resize mask to work size if needed
         if m.size != work.size:
             m = m.resize(work.size, Image.NEAREST)
         arr = np.array(m)
-        # Check if tap point falls inside this mask
+        area = int((arr > 127).sum())
+        all_masks.append((area, m))
         if arr[ty, tx] > 127:
-            area = int((arr > 127).sum())
-            # Prefer the smallest mask that covers the tap (most precise)
-            if best_area is None or area < best_area:
-                best_mask_pil = m
-                best_area     = area
+            candidates.append((area, m))
+
+    # Among masks that cover the tap, pick the LARGEST one.
+    # Walls are large surfaces; switches/outlets are tiny objects in front of walls.
+    # The largest mask at the tap point is almost always the wall/ceiling/floor.
+    best_mask_pil = None
+    best_area     = None
+    if candidates:
+        # Sort by area descending, take the largest
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        best_area, best_mask_pil = candidates[0]
 
     if best_mask_pil is None:
-        # No mask covers the tap → pick the one whose centroid is closest
+        # No mask covers the tap → pick the largest mask whose centroid is closest
         best_dist = float("inf")
-        for mask_url in individual_masks:
-            resp = req.get(str(mask_url), timeout=30)
-            resp.raise_for_status()
-            m = Image.open(io.BytesIO(resp.content)).convert("L")
-            if m.size != work.size:
-                m = m.resize(work.size, Image.NEAREST)
+        for area, m in all_masks:
             arr = np.array(m)
             ys, xs = np.where(arr > 127)
             if len(xs) == 0:
