@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:before_after/before_after.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -17,6 +18,77 @@ import '../services/api_service.dart';
 import '../services/supabase_service.dart';
 import '../utils/color_ext.dart';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Isolate payload — everything compute() needs (no ui.Image allowed across isolates)
+// ─────────────────────────────────────────────────────────────────────────────
+class _BlendParams {
+  final Uint8List srcRgba;
+  final int srcW;
+  final int srcH;
+  final Uint8List maskRgba;
+  final int maskW;
+  final int maskH;
+  final int tR;
+  final int tG;
+  final int tB;
+
+  const _BlendParams({
+    required this.srcRgba,
+    required this.srcW,
+    required this.srcH,
+    required this.maskRgba,
+    required this.maskW,
+    required this.maskH,
+    required this.tR,
+    required this.tG,
+    required this.tB,
+  });
+}
+
+/// Runs in an isolate — no Flutter UI access.
+/// Overlay blend: preserves luminance texture, applies target hue.
+Uint8List _blendIsolate(_BlendParams p) {
+  final src = p.srcRgba;
+  final mask = p.maskRgba;
+  final out = Uint8List.fromList(src);
+
+  final total = p.srcW * p.srcH;
+  for (int i = 0; i < total; i++) {
+    final sb = i * 4;
+
+    // Bilinear-nearest mask lookup — correct even when mask != src size
+    final mx = ((i % p.srcW) * p.maskW / p.srcW).round().clamp(0, p.maskW - 1);
+    final my = ((i ~/ p.srcW) * p.maskH / p.srcH).round().clamp(0, p.maskH - 1);
+    final maskVal = mask[(my * p.maskW + mx) * 4]; // R channel
+
+    if (maskVal <= 127) continue;
+
+    final r = src[sb] / 255.0;
+    final g = src[sb + 1] / 255.0;
+    final b = src[sb + 2] / 255.0;
+    final tR = p.tR / 255.0;
+    final tG = p.tG / 255.0;
+    final tB = p.tB / 255.0;
+
+    // Overlay blend: preserves wall texture (shadows/highlights), applies color
+    // Formula: if base < 0.5 → 2*base*blend, else → 1 - 2*(1-base)*(1-blend)
+    double ovR = r < 0.5 ? 2 * r * tR : 1 - 2 * (1 - r) * (1 - tR);
+    double ovG = g < 0.5 ? 2 * g * tG : 1 - 2 * (1 - g) * (1 - tG);
+    double ovB = b < 0.5 ? 2 * b * tB : 1 - 2 * (1 - b) * (1 - tB);
+
+    // Blend 80% overlay result with 20% original (keeps some texture detail)
+    const strength = 0.80;
+    out[sb]     = ((ovR * strength + r * (1 - strength)) * 255).round().clamp(0, 255);
+    out[sb + 1] = ((ovG * strength + g * (1 - strength)) * 255).round().clamp(0, 255);
+    out[sb + 2] = ((ovB * strength + b * (1 - strength)) * 255).round().clamp(0, 255);
+  }
+
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Screen
+// ─────────────────────────────────────────────────────────────────────────────
 class RoomPreviewScreen extends StatefulWidget {
   final String originalImageUrl;
   final String? renderedImageUrl;
@@ -43,11 +115,13 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   bool _saving = false;
   bool _rendering = false;
   String _renderStatus = '';
-  String _selectedSurface = 'wall'; // wall | ceiling | floor
+
+  // Multi-surface selection
+  final Set<String> _selectedSurfaces = {'wall'};
 
   ui.Image? _srcImage;
   Uint8List? _srcRgba;
-  Uint8List? _srcJpeg;      // raw JPEG to send to backend
+  Uint8List? _srcJpeg;
   Uint8List? _renderedBytes;
 
   @override
@@ -62,7 +136,6 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       final rawBytes = await widget.imageFile!.readAsBytes();
       _srcJpeg = rawBytes;
 
-      // dart:ui applies EXIF rotation automatically
       final codec = await ui.instantiateImageCodec(rawBytes);
       final frame = await codec.getNextFrame();
       final img = frame.image;
@@ -70,65 +143,57 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       _srcImage = img;
       _srcRgba = byteData!.buffer.asUint8List();
 
-      await _runSegmentAndPaint(_selectedSurface);
+      await _runSegmentAndPaint();
     } catch (e) {
       if (mounted) setState(() { _rendering = false; _renderStatus = 'Failed: $e'; });
     }
   }
 
-  Future<void> _runSegmentAndPaint(String surface) async {
+  Future<void> _runSegmentAndPaint() async {
     if (_srcImage == null || _srcRgba == null || _srcJpeg == null) return;
-    setState(() { _rendering = true; _renderedBytes = null; _renderStatus = 'Detecting $surface…'; });
+    final surfaceLabel = _selectedSurfaces.join(',');
+    setState(() { _rendering = true; _renderedBytes = null; _renderStatus = 'Detecting ${_selectedSurfaces.join(' + ')}…'; });
+
     try {
-      // 1. Get AI wall mask from backend
+      // 1. AI segmentation — returns clean binary mask PNG at orig resolution
       final imageBase64 = base64Encode(_srcJpeg!);
       final maskBase64 = await ApiService().segmentWall(
         imageBase64: imageBase64,
-        surface: surface,
+        surface: surfaceLabel,
       );
 
-      setState(() => _renderStatus = 'Painting $surface…');
+      setState(() => _renderStatus = 'Painting…');
 
-      // 2. Decode mask PNG → RGBA bytes
+      // 2. Decode mask
       final maskBytes = base64Decode(maskBase64);
       final maskCodec = await ui.instantiateImageCodec(maskBytes);
       final maskFrame = await maskCodec.getNextFrame();
       final maskImg = maskFrame.image;
       final maskByteData = await maskImg.toByteData(format: ui.ImageByteFormat.rawRgba);
-      final mask = maskByteData!.buffer.asUint8List();
+      final maskRgba = maskByteData!.buffer.asUint8List();
 
-      // 3. Resize mask to match src image if needed
-      final srcW = _srcImage!.width, srcH = _srcImage!.height;
-      final maskW = maskImg.width, maskH = maskImg.height;
-
-      // 4. Apply color blend where mask is white
+      // 3. Blend in isolate (Priority 2: compute() — no UI thread blocking)
       final target = HexColor.fromHex(widget.selectedHex);
-      final tR = target.red, tG = target.green, tB = target.blue;
-      final src = _srcRgba!;
-      final out = Uint8List.fromList(src);
+      final params = _BlendParams(
+        srcRgba: _srcRgba!,
+        srcW: _srcImage!.width,
+        srcH: _srcImage!.height,
+        maskRgba: maskRgba,
+        maskW: maskImg.width,
+        maskH: maskImg.height,
+        tR: target.red,
+        tG: target.green,
+        tB: target.blue,
+      );
 
-      const blend = 0.72;
-      final total = srcW * srcH;
+      final out = await compute(_blendIsolate, params);
 
-      for (int i = 0; i < total; i++) {
-        final srcBase = i * 4;
-        // Map src pixel to mask pixel (mask may be different size)
-        final mx = ((i % srcW) * maskW / srcW).round().clamp(0, maskW - 1);
-        final my = ((i ~/ srcW) * maskH / srcH).round().clamp(0, maskH - 1);
-        final maskBase = (my * maskW + mx) * 4;
-
-        final maskVal = mask[maskBase]; // R channel of mask (0=black, 255=white)
-        if (maskVal > 127) {
-          final r = src[srcBase], g = src[srcBase + 1], b = src[srcBase + 2];
-          out[srcBase]     = (r * (1 - blend) + tR * blend).round().clamp(0, 255);
-          out[srcBase + 1] = (g * (1 - blend) + tG * blend).round().clamp(0, 255);
-          out[srcBase + 2] = (b * (1 - blend) + tB * blend).round().clamp(0, 255);
-        }
-      }
-
-      // 5. Encode result as PNG
+      // 4. Encode result as PNG (back on main isolate — ui.* only works here)
       final c = Completer<ui.Image>();
-      ui.decodeImageFromPixels(out, srcW, srcH, ui.PixelFormat.rgba8888, c.complete);
+      ui.decodeImageFromPixels(
+        out, _srcImage!.width, _srcImage!.height,
+        ui.PixelFormat.rgba8888, c.complete,
+      );
       final rendered = await c.future;
       final bd = await rendered.toByteData(format: ui.ImageByteFormat.png);
 
@@ -139,6 +204,18 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
     } finally {
       if (mounted) setState(() => _rendering = false);
     }
+  }
+
+  void _toggleSurface(String surface) {
+    if (_rendering) return;
+    setState(() {
+      if (_selectedSurfaces.contains(surface)) {
+        if (_selectedSurfaces.length > 1) _selectedSurfaces.remove(surface);
+      } else {
+        _selectedSurfaces.add(surface);
+      }
+    });
+    _runSegmentAndPaint();
   }
 
   Widget _buildOriginalImage() {
@@ -196,68 +273,61 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       ),
       body: Column(
         children: [
-          // Color chip + surface selector
+          // Color chip
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
-            child: Row(
-              children: [
-                Container(width: 22, height: 22,
-                  decoration: BoxDecoration(color: swatchColor,
-                    borderRadius: BorderRadius.circular(5), border: Border.all(color: AppColors.border))),
-                const SizedBox(width: 8),
-                Expanded(child: Text(widget.selectedColorName,
-                    style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.w600, fontSize: 14),
-                    overflow: TextOverflow.ellipsis)),
-              ],
-            ),
+            child: Row(children: [
+              Container(width: 22, height: 22,
+                decoration: BoxDecoration(color: swatchColor,
+                  borderRadius: BorderRadius.circular(5), border: Border.all(color: AppColors.border))),
+              const SizedBox(width: 8),
+              Expanded(child: Text(widget.selectedColorName,
+                style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.w600, fontSize: 14),
+                overflow: TextOverflow.ellipsis)),
+            ]),
           ),
 
-          // Surface selector chips
+          // Multi-surface selector (Priority 5)
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
-            child: Row(
-              children: [
-                const Text('Paint:', style: TextStyle(color: AppColors.textSecondary, fontSize: 12)),
-                const SizedBox(width: 10),
-                ...[
-                  ('wall', Icons.format_paint),
-                  ('ceiling', Icons.roofing),
-                  ('floor', Icons.layers),
-                ].map((item) {
-                  final selected = _selectedSurface == item.$1;
-                  return Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: GestureDetector(
-                      onTap: _rendering ? null : () {
-                        setState(() => _selectedSurface = item.$1);
-                        _runSegmentAndPaint(item.$1);
-                      },
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 150),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: selected ? AppColors.accentDim : AppColors.card,
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: selected ? AppColors.accent : AppColors.border,
-                            width: selected ? 1.5 : 1,
-                          ),
-                        ),
-                        child: Row(mainAxisSize: MainAxisSize.min, children: [
-                          Icon(item.$2, size: 13,
-                            color: selected ? AppColors.accent : AppColors.textSecondary),
-                          const SizedBox(width: 5),
-                          Text(item.$1[0].toUpperCase() + item.$1.substring(1),
-                            style: TextStyle(
-                              color: selected ? AppColors.accent : AppColors.textSecondary,
-                              fontSize: 12, fontWeight: selected ? FontWeight.w600 : FontWeight.normal)),
-                        ]),
+            child: Row(children: [
+              const Text('Paint:', style: TextStyle(color: AppColors.textSecondary, fontSize: 12)),
+              const SizedBox(width: 10),
+              ...[
+                ('wall',    Icons.format_paint, 'Wall'),
+                ('ceiling', Icons.roofing,      'Ceiling'),
+                ('floor',   Icons.layers,       'Floor'),
+              ].map((item) {
+                final selected = _selectedSurfaces.contains(item.$1);
+                return Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: GestureDetector(
+                    onTap: () => _toggleSurface(item.$1),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 150),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: selected ? AppColors.accentDim : AppColors.card,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                          color: selected ? AppColors.accent : AppColors.border,
+                          width: selected ? 1.5 : 1),
                       ),
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(item.$2, size: 13,
+                          color: selected ? AppColors.accent : AppColors.textSecondary),
+                        const SizedBox(width: 5),
+                        Text(item.$3,
+                          style: TextStyle(
+                            color: selected ? AppColors.accent : AppColors.textSecondary,
+                            fontSize: 12,
+                            fontWeight: selected ? FontWeight.w600 : FontWeight.normal)),
+                      ]),
                     ),
-                  );
-                }),
-              ],
-            ),
+                  ),
+                );
+              }),
+            ]),
           ),
 
           // Image area
@@ -270,8 +340,8 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                       const CircularProgressIndicator(color: AppColors.accent, strokeWidth: 2),
                       const SizedBox(height: 16),
                       Text(_renderStatus,
-                          style: const TextStyle(color: AppColors.textPrimary, fontSize: 14),
-                          textAlign: TextAlign.center),
+                        style: const TextStyle(color: AppColors.textPrimary, fontSize: 14),
+                        textAlign: TextAlign.center),
                     ])),
                   ])
                 : hasRender
@@ -309,7 +379,7 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                                 textAlign: TextAlign.center),
                               const SizedBox(height: 16),
                               FilledButton(
-                                onPressed: () => _runSegmentAndPaint(_selectedSurface),
+                                onPressed: _runSegmentAndPaint,
                                 child: const Text('Retry')),
                             ]),
                           )),
