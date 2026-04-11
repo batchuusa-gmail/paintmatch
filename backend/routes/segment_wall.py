@@ -1,102 +1,82 @@
 """
-PM-11b: POST /segment-wall
-Primary: nvidia/segformer-b0-finetuned-ade-512-512 locally via transformers.
-Fallback: K-means color clustering + spatial heuristic if torch unavailable.
+POST /segment-wall
+Segments walls/ceiling/floor using SLIC superpixels (scikit-image) +
+spatial position heuristics. No heavy ML deps — works on any Railway tier.
 Returns a base64 PNG mask — white = target surface, black = everything else.
 """
 import base64
 import io
-import os
 
 import numpy as np
 from flask import Blueprint, jsonify, request
-from PIL import Image, ImageChops, ImageFilter, ImageOps
+from PIL import Image, ImageFilter, ImageOps
+from skimage.segmentation import slic
+from skimage.util import img_as_float
 
 segment_wall_bp = Blueprint("segment_wall", __name__)
 
-# ADE20K label→index mapping for the surfaces we care about
-# Full list: https://huggingface.co/nvidia/segformer-b0-finetuned-ade-512-512
-ADE20K_LABELS = {
-    "wall": 0,
-    "floor": 3,
-    "ceiling": 5,
-}
 
-# Lazy-loaded model — loaded once on first request
-_pipeline = None
-_torch_available = None
+def _segment(pil: Image.Image, surface: str) -> Image.Image:
+    """
+    SLIC superpixel segmentation + spatial prior.
 
-def _get_pipeline():
-    global _pipeline, _torch_available
-    if _torch_available is None:
-        try:
-            import torch  # noqa: F401
-            _torch_available = True
-        except ImportError:
-            _torch_available = False
+    Strategy per surface:
+      wall    — dominant color cluster in the middle 60% height band
+      floor   — dominant cluster in the bottom 30%
+      ceiling — dominant cluster in the top 20%
+    """
+    W, H = pil.size
+    work_w, work_h = min(W, 512), min(H, 512)
+    small = pil.resize((work_w, work_h), Image.BILINEAR)
+    arr = img_as_float(np.array(small))           # (H, W, 3) float64
 
-    if not _torch_available:
-        return None
+    # SLIC superpixels — ~200 segments, compact so they respect color borders
+    segments = slic(arr, n_segments=200, compactness=10, sigma=1,
+                    start_label=0, channel_axis=2)
 
-    if _pipeline is None:
-        from transformers import pipeline as hf_pipeline
-        _pipeline = hf_pipeline(
-            "image-segmentation",
-            model="nvidia/segformer-b0-finetuned-ade-512-512",
-            device=-1,  # CPU
-        )
-    return _pipeline
+    h, w = segments.shape
 
+    # Define the spatial ROI for each surface
+    if surface == "floor":
+        row_lo, row_hi = int(h * 0.65), h
+        col_lo, col_hi = 0, w
+    elif surface == "ceiling":
+        row_lo, row_hi = 0, int(h * 0.22)
+        col_lo, col_hi = 0, w
+    else:  # wall (default)
+        row_lo, row_hi = int(h * 0.15), int(h * 0.80)
+        col_lo, col_hi = int(w * 0.05), int(w * 0.95)
 
-def _kmeans_segment(pil: Image.Image, surface: str) -> Image.Image:
-    """Fallback: K-means color clustering + spatial heuristic."""
-    from sklearn.cluster import MiniBatchKMeans
+    roi_labels = segments[row_lo:row_hi, col_lo:col_hi].flatten()
+    if len(roi_labels) == 0:
+        roi_labels = segments.flatten()
 
-    size = (256, 256)
-    small = pil.resize(size, Image.BILINEAR)
-    arr = np.array(small).reshape(-1, 3).astype(np.float32)
+    # Most frequent superpixel label in the ROI → that's our target region
+    dominant = int(np.bincount(roi_labels).argmax())
 
-    k = min(8, len(arr))
-    km = MiniBatchKMeans(n_clusters=k, n_init=3, max_iter=50, random_state=0)
-    labels = km.fit_predict(arr).reshape(size[1], size[0])
+    # Expand: include all superpixels whose average color is close to dominant
+    dom_pixels = arr[segments == dominant]
+    dom_mean = dom_pixels.mean(axis=0)                  # (3,) RGB mean
 
-    h, w = size[1], size[0]
-    if surface == "wall":
-        roi = labels[h // 5: 4 * h // 5, w // 10: 9 * w // 10]
-    elif surface == "floor":
-        roi = labels[2 * h // 3:, :]
-    else:  # ceiling
-        roi = labels[:h // 5, :]
-
-    dominant = int(np.bincount(roi.flatten()).argmax())
-    mask_small = ((labels == dominant).astype(np.uint8) * 255)
-    return Image.fromarray(mask_small, mode="L").resize(pil.size, Image.NEAREST)
-
-
-def _combine_masks(segments: list, target_labels: set, orig_size: tuple) -> Image.Image:
-    """OR-combine all masks for target_labels into a single L-mode image at orig_size."""
-    combined = Image.new("L", orig_size, 0)
-    for seg in segments:
-        label = seg.get("label", "").lower()
-        if label not in target_labels:
+    n_labels = segments.max() + 1
+    mask = np.zeros((h, w), dtype=np.uint8)
+    for lbl in range(n_labels):
+        px = arr[segments == lbl]
+        if len(px) == 0:
             continue
-        mask_pil = seg.get("mask")  # transformers pipeline returns PIL Image
-        if mask_pil is None:
-            continue
-        # Resize to original image size if needed
-        if mask_pil.size != orig_size:
-            mask_pil = mask_pil.resize(orig_size, Image.NEAREST)
-        gray = mask_pil.convert("L")
-        thresholded = gray.point(lambda p: 255 if p > 127 else 0)
-        combined = ImageChops.lighter(combined, thresholded)
-    return combined
+        dist = np.linalg.norm(px.mean(axis=0) - dom_mean)
+        if dist < 0.12:                                  # color distance threshold
+            mask[segments == lbl] = 255
+
+    mask_pil = Image.fromarray(mask, mode="L").resize(pil.size, Image.NEAREST)
+    return mask_pil
 
 
 def _clean_mask(mask: Image.Image) -> Image.Image:
-    """Blur → re-threshold → erode to remove noise and soften edges."""
-    blurred = mask.filter(ImageFilter.GaussianBlur(radius=2))
-    binary = blurred.point(lambda p: 255 if p > 80 else 0)
-    eroded = binary.filter(ImageFilter.MinFilter(size=5))
+    """Blur → re-threshold → erode to smooth edges and reduce noise."""
+    blurred = mask.filter(ImageFilter.GaussianBlur(radius=3))
+    binary  = blurred.point(lambda p: 255 if p > 100 else 0)
+    eroded  = binary.filter(ImageFilter.MinFilter(size=5))
     return eroded
 
 
@@ -104,9 +84,8 @@ def _clean_mask(mask: Image.Image) -> Image.Image:
 def segment_wall():
     data = request.get_json(force=True, silent=True) or {}
 
-    image_b64 = data.get("image")
-    surface_param = data.get("surface", "wall").lower()
-    target_labels = {s.strip() for s in surface_param.split(",")}
+    image_b64    = data.get("image")
+    surface_param = data.get("surface", "wall").lower().split(",")[0].strip()
 
     if not image_b64:
         return jsonify({"data": None, "error": "Missing image"}), 400
@@ -116,49 +95,31 @@ def segment_wall():
     except Exception:
         return jsonify({"data": None, "error": "Invalid base64"}), 400
 
-    # Correct EXIF rotation
     try:
         pil = Image.open(io.BytesIO(image_bytes))
         pil = ImageOps.exif_transpose(pil).convert("RGB")
-        orig_size = pil.size  # (width, height)
     except Exception as e:
-        return jsonify({"data": None, "error": f"Image processing failed: {e}"}), 500
+        return jsonify({"data": None, "error": f"Image decode failed: {e}"}), 500
 
-    # Run segmentation — try AI pipeline, fall back to K-means
-    used_fallback = False
-    pipe = _get_pipeline()
-    if pipe is not None:
-        try:
-            segments = pipe(pil)  # returns list of {label, score, mask (PIL Image)}
-            if not segments:
-                raise ValueError("No segments returned")
-            combined = _combine_masks(segments, target_labels, orig_size)
-        except Exception as e:
-            # AI failed — fall back
-            print(f"[segment-wall] AI pipeline failed ({e}), using K-means fallback")
-            combined = _kmeans_segment(pil, surface_param)
-            used_fallback = True
-    else:
-        combined = _kmeans_segment(pil, surface_param)
-        used_fallback = True
+    try:
+        raw    = _segment(pil, surface_param)
+        cleaned = _clean_mask(raw)
+    except Exception as e:
+        return jsonify({"data": None, "error": f"Segmentation failed: {e}"}), 500
 
-    cleaned = _clean_mask(combined)
-    segments = [] if used_fallback else segments
+    buf = io.BytesIO()
+    cleaned.save(buf, format="PNG")
+    mask_b64 = base64.b64encode(buf.getvalue()).decode()
 
-    out_buf = io.BytesIO()
-    cleaned.save(out_buf, format="PNG")
-    mask_b64 = base64.b64encode(out_buf.getvalue()).decode()
-
-    mask_arr = np.array(cleaned)
-    coverage = float((mask_arr > 127).sum()) / mask_arr.size
+    arr = np.array(cleaned)
+    coverage = float((arr > 127).sum()) / arr.size
 
     return jsonify({
         "data": {
-            "mask": mask_b64,
-            "surface": surface_param,
+            "mask":     mask_b64,
+            "surface":  surface_param,
             "coverage": round(coverage, 3),
-            "segments_found": [s.get("label") for s in segments],
-            "method": "kmeans_fallback" if used_fallback else "segformer",
+            "method":   "slic",
         },
         "error": None,
     })
