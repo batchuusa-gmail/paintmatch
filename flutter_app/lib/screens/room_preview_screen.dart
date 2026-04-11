@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
-import 'package:before_after/before_after.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -49,25 +48,36 @@ class _BlendParams {
 }
 
 Uint8List _blendIsolate(_BlendParams p) {
-  final src = p.srcRgba;
+  final src  = p.srcRgba;
   final mask = p.maskRgba;
-  final out = Uint8List.fromList(src);
+  final out  = Uint8List.fromList(src);
   final total = p.srcW * p.srcH;
+  final tR = p.tR / 255.0, tG = p.tG / 255.0, tB = p.tB / 255.0;
+  // Luminance of target color
+  final tLum = 0.299 * tR + 0.587 * tG + 0.114 * tB;
+
   for (int i = 0; i < total; i++) {
     final sb = i * 4;
     final mx = ((i % p.srcW) * p.maskW / p.srcW).round().clamp(0, p.maskW - 1);
     final my = ((i ~/ p.srcW) * p.maskH / p.srcH).round().clamp(0, p.maskH - 1);
     if (mask[(my * p.maskW + mx) * 4] <= 127) continue;
+
     final r = src[sb] / 255.0, g = src[sb+1] / 255.0, b = src[sb+2] / 255.0;
-    final tR = p.tR / 255.0, tG = p.tG / 255.0, tB = p.tB / 255.0;
-    // Overlay blend — preserves texture/shadows
-    double ovR = r < 0.5 ? 2*r*tR : 1-2*(1-r)*(1-tR);
-    double ovG = g < 0.5 ? 2*g*tG : 1-2*(1-g)*(1-tG);
-    double ovB = b < 0.5 ? 2*b*tB : 1-2*(1-b)*(1-tB);
-    const s = 0.80;
-    out[sb]   = ((ovR*s + r*(1-s))*255).round().clamp(0, 255);
-    out[sb+1] = ((ovG*s + g*(1-s))*255).round().clamp(0, 255);
-    out[sb+2] = ((ovB*s + b*(1-s))*255).round().clamp(0, 255);
+
+    // Luminosity-preserving recolor:
+    // Scale target color so its luminance matches original pixel's luminance.
+    // This keeps shadows/highlights/texture but swaps the hue+saturation.
+    final srcLum = 0.299 * r + 0.587 * g + 0.114 * b;
+    final scale  = (tLum > 0.001) ? (srcLum / tLum) : 1.0;
+    final reR = (tR * scale).clamp(0.0, 1.0);
+    final reG = (tG * scale).clamp(0.0, 1.0);
+    final reB = (tB * scale).clamp(0.0, 1.0);
+
+    // 85% recolored + 15% original for subtle texture retention
+    const s = 0.85;
+    out[sb]   = ((reR * s + r * (1 - s)) * 255).round().clamp(0, 255);
+    out[sb+1] = ((reG * s + g * (1 - s)) * 255).round().clamp(0, 255);
+    out[sb+2] = ((reB * s + b * (1 - s)) * 255).round().clamp(0, 255);
   }
   return out;
 }
@@ -254,9 +264,9 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       ),
       body: Column(
         children: [
-          // ── Room image preview (40% height) ──────────────────────────────
+          // ── Room image preview (48% height) ──────────────────────────────
           SizedBox(
-            height: screenH * 0.38,
+            height: screenH * 0.48,
             child: _rendering
                 ? Stack(fit: StackFit.expand, children: [
                     _buildOriginalImage(),
@@ -270,25 +280,10 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                     ])),
                   ])
                 : _renderedBytes != null
-                    ? Stack(children: [
-                        Positioned.fill(child: BeforeAfter(
-                          thumbColor: AppColors.accent,
-                          before: _buildOriginalImage(),
-                          after: Image.memory(_renderedBytes!, fit: BoxFit.cover),
-                        )),
-                        Positioned(bottom: 10, left: 0, right: 0,
-                          child: IgnorePointer(child: Center(child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-                            decoration: BoxDecoration(
-                              color: Colors.black54,
-                              borderRadius: BorderRadius.circular(16)),
-                            child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                              Icon(Icons.swap_horiz, color: Colors.white, size: 13),
-                              SizedBox(width: 5),
-                              Text('Drag to compare', style: TextStyle(color: Colors.white, fontSize: 11)),
-                            ]),
-                          )))),
-                      ])
+                    ? _BeforeAfterSlider(
+                        before: _buildOriginalImage(),
+                        after: Image.memory(_renderedBytes!, fit: BoxFit.cover),
+                      )
                     : Stack(fit: StackFit.expand, children: [
                         _buildOriginalImage(),
                         if (_renderStatus.isNotEmpty)
@@ -454,6 +449,92 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       ),
     );
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Custom before/after slider
+// ─────────────────────────────────────────────────────────────────────────────
+class _BeforeAfterSlider extends StatefulWidget {
+  final Widget before;
+  final Widget after;
+  const _BeforeAfterSlider({required this.before, required this.after});
+
+  @override
+  State<_BeforeAfterSlider> createState() => _BeforeAfterSliderState();
+}
+
+class _BeforeAfterSliderState extends State<_BeforeAfterSlider> {
+  double _split = 0.5; // 0.0 = all before, 1.0 = all after
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(builder: (ctx, constraints) {
+      final w = constraints.maxWidth;
+      final h = constraints.maxHeight;
+      final splitX = w * _split;
+
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragUpdate: (d) {
+          setState(() {
+            _split = ((_split * w + d.delta.dx) / w).clamp(0.02, 0.98);
+          });
+        },
+        onTapDown: (d) {
+          setState(() => _split = (d.localPosition.dx / w).clamp(0.02, 0.98));
+        },
+        child: Stack(children: [
+          // After (full width underneath)
+          Positioned.fill(child: widget.after),
+          // Before (clipped to left of split)
+          Positioned(
+            left: 0, top: 0, bottom: 0,
+            width: splitX,
+            child: ClipRect(
+              child: OverflowBox(
+                alignment: Alignment.centerLeft,
+                maxWidth: w,
+                child: SizedBox(width: w, height: h, child: widget.before),
+              ),
+            ),
+          ),
+          // Divider line
+          Positioned(
+            left: splitX - 1, top: 0, bottom: 0,
+            child: Container(width: 2, color: AppColors.accent),
+          ),
+          // Handle
+          Positioned(
+            left: splitX - 20, top: h / 2 - 20,
+            child: Container(
+              width: 40, height: 40,
+              decoration: BoxDecoration(
+                color: AppColors.accent,
+                shape: BoxShape.circle,
+                boxShadow: [BoxShadow(color: Colors.black38, blurRadius: 6)],
+              ),
+              child: const Icon(Icons.swap_horiz, color: Colors.black, size: 20),
+            ),
+          ),
+          // Labels
+          Positioned(top: 10, left: 10,
+            child: _label('BEFORE')),
+          Positioned(top: 10, right: 10,
+            child: _label('AFTER')),
+        ]),
+      );
+    });
+  }
+
+  Widget _label(String text) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+    decoration: BoxDecoration(
+      color: Colors.black54,
+      borderRadius: BorderRadius.circular(6)),
+    child: Text(text,
+      style: const TextStyle(color: Colors.white, fontSize: 10,
+          fontWeight: FontWeight.w700, letterSpacing: 0.5)),
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
