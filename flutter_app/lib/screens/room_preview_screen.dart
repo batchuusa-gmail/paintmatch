@@ -84,10 +84,9 @@ Uint8List _blendIsolate(_BlendParams p) {
   final out  = Uint8List.fromList(src);
   final total = p.srcW * p.srcH;
 
-  // Target color in HSL — we'll use its H and S, keep original L per pixel
   final tR = p.tR / 255.0, tG = p.tG / 255.0, tB = p.tB / 255.0;
   final targetHsl = _rgbToHsl(tR, tG, tB);
-  final tH = targetHsl[0], tS = targetHsl[1];
+  final tH = targetHsl[0], tS = targetHsl[1], tL = targetHsl[2];
 
   for (int i = 0; i < total; i++) {
     final sb = i * 4;
@@ -96,18 +95,15 @@ Uint8List _blendIsolate(_BlendParams p) {
     if (mask[(my * p.maskW + mx) * 4] <= 127) continue;
 
     final r = src[sb] / 255.0, g = src[sb+1] / 255.0, b = src[sb+2] / 255.0;
-
-    // HSL Color blend mode (same as Photoshop "Color" layer):
-    // Keep original Lightness, apply target Hue + Saturation.
-    // This changes the color dramatically while preserving shadows/texture.
     final srcHsl = _rgbToHsl(r, g, b);
     final srcL   = srcHsl[2];
 
-    // Blend 90% target HS + 10% original HS for subtle texture retention
-    final blendH = tH;
-    final blendS = tS * 0.9 + srcHsl[1] * 0.1;
+    // Use target H + S (full color swap)
+    // Lightness: 40% original (keeps shadows/texture) + 60% target (shows true color)
+    // This makes dark colors look dark and bright colors look bright
+    final blendL = srcL * 0.40 + tL * 0.60;
 
-    final recolored = _hslToRgb(blendH, blendS, srcL);
+    final recolored = _hslToRgb(tH, tS, blendL);
     out[sb]   = (recolored[0] * 255).round().clamp(0, 255);
     out[sb+1] = (recolored[1] * 255).round().clamp(0, 255);
     out[sb+2] = (recolored[2] * 255).round().clamp(0, 255);
@@ -159,6 +155,10 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   Uint8List? _srcJpeg;
   Uint8List? _renderedBytes;
 
+  // Cached mask — reuse on color change, only re-fetch on new tap
+  Uint8List? _cachedMaskRgba;
+  int? _cachedMaskW, _cachedMaskH;
+
   @override
   void initState() {
     super.initState();
@@ -188,33 +188,42 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
 
   Future<void> _paint({double? seedX, double? seedY}) async {
     if (_srcImage == null || _srcRgba == null || _srcJpeg == null) return;
-    // Remember seed for color changes
+
+    final isNewTap = seedX != null || seedY != null;
     if (seedX != null) _seedX = seedX;
     if (seedY != null) _seedY = seedY;
 
     setState(() {
       _rendering = true;
       _renderedBytes = null;
-      _renderStatus = _seedX != null ? 'Segmenting from tap…' : 'Detecting $_selectedSurface…';
+      _renderStatus = isNewTap ? 'Segmenting wall…' : 'Applying color…';
     });
-    try {
-      final maskBase64 = await ApiService().segmentWall(
-        imageBase64: base64Encode(_srcJpeg!),
-        surface: _selectedSurface,
-        seedX: _seedX,
-        seedY: _seedY,
-      );
-      setState(() => _renderStatus = 'Applying color…');
-      final maskBytes = base64Decode(maskBase64);
-      final maskCodec = await ui.instantiateImageCodec(maskBytes);
-      final maskFrame = await maskCodec.getNextFrame();
-      final maskImg = maskFrame.image;
-      final maskBd = await maskImg.toByteData(format: ui.ImageByteFormat.rawRgba);
 
+    try {
+      // Only call SAM on a new tap — reuse cached mask for color changes
+      if (isNewTap || _cachedMaskRgba == null) {
+        setState(() => _renderStatus = 'Analyzing surface… (10–15s first time)');
+        final maskBase64 = await ApiService().segmentWall(
+          imageBase64: base64Encode(_srcJpeg!),
+          surface: _selectedSurface,
+          seedX: _seedX,
+          seedY: _seedY,
+        );
+        final maskBytes = base64Decode(maskBase64);
+        final maskCodec = await ui.instantiateImageCodec(maskBytes);
+        final maskFrame = await maskCodec.getNextFrame();
+        final maskImg   = maskFrame.image;
+        final maskBd    = await maskImg.toByteData(format: ui.ImageByteFormat.rawRgba);
+        _cachedMaskRgba = maskBd!.buffer.asUint8List();
+        _cachedMaskW    = maskImg.width;
+        _cachedMaskH    = maskImg.height;
+      }
+
+      setState(() => _renderStatus = 'Applying color…');
       final target = HexColor.fromHex(_selectedHex);
       final out = await compute(_blendIsolate, _BlendParams(
         srcRgba: _srcRgba!, srcW: _srcImage!.width, srcH: _srcImage!.height,
-        maskRgba: maskBd!.buffer.asUint8List(), maskW: maskImg.width, maskH: maskImg.height,
+        maskRgba: _cachedMaskRgba!, maskW: _cachedMaskW!, maskH: _cachedMaskH!,
         tR: (target.r * 255).round(),
         tG: (target.g * 255).round(),
         tB: (target.b * 255).round(),
@@ -345,6 +354,7 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                               _renderedBytes = null;
                               _seedX = null;
                               _seedY = null;
+                              _cachedMaskRgba = null;
                             }),
                             child: Container(
                               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
@@ -443,6 +453,7 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                             _renderedBytes = null;
                             _seedX = null;
                             _seedY = null;
+                            _cachedMaskRgba = null;
                           });
                         },
                         child: AnimatedContainer(
