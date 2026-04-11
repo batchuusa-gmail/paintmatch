@@ -87,12 +87,19 @@ class ApiService {
   Future<String> segmentWall({
     required String imageBase64,
     String surface = 'wall',
+    double? seedX,
+    double? seedY,
   }) async {
     final uri = Uri.parse('$_base/segment-wall');
+    final body = <String, dynamic>{'image': imageBase64, 'surface': surface};
+    if (seedX != null && seedY != null) {
+      body['seed_x'] = seedX;
+      body['seed_y'] = seedY;
+    }
     final response = await http.post(
       uri,
       headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'image': imageBase64, 'surface': surface}),
+      body: jsonEncode(body),
     );
     final json = jsonDecode(response.body) as Map<String, dynamic>;
     if (json['error'] != null) throw Exception(json['error']);

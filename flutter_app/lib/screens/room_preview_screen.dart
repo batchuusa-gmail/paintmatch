@@ -108,16 +108,17 @@ class RoomPreviewScreen extends StatefulWidget {
 }
 
 class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
-  // State
   bool _saving = false;
   bool _rendering = false;
   String _renderStatus = '';
-  String _environment = 'interior'; // interior | exterior
+  String _environment = 'interior';
   String _selectedSurface = 'wall';
 
-  // Selected color — starts from widget.selectedHex
   late String _selectedHex;
   late String _selectedColorName;
+
+  // Tap seed — normalized 0–1 coords within the displayed image
+  double? _seedX, _seedY;
 
   // Image data
   ui.Image? _srcImage;
@@ -135,7 +136,7 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
 
   Future<void> _loadImage() async {
     if (widget.imageFile == null) return;
-    setState(() { _rendering = true; _renderStatus = 'Loading…'; });
+    setState(() { _rendering = true; _renderStatus = 'Loading image…'; });
     try {
       final rawBytes = await widget.imageFile!.readAsBytes();
       _srcJpeg = rawBytes;
@@ -145,21 +146,32 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       final bd = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
       _srcImage = img;
       _srcRgba = bd!.buffer.asUint8List();
-      await _paint();
     } catch (e) {
-      if (mounted) setState(() { _rendering = false; _renderStatus = 'Failed: $e'; });
+      if (mounted) setState(() { _renderStatus = 'Failed to load: $e'; });
+    } finally {
+      if (mounted) setState(() => _rendering = false);
     }
   }
 
-  Future<void> _paint() async {
+  Future<void> _paint({double? seedX, double? seedY}) async {
     if (_srcImage == null || _srcRgba == null || _srcJpeg == null) return;
-    setState(() { _rendering = true; _renderedBytes = null; _renderStatus = 'Detecting $_selectedSurface…'; });
+    // Remember seed for color changes
+    if (seedX != null) _seedX = seedX;
+    if (seedY != null) _seedY = seedY;
+
+    setState(() {
+      _rendering = true;
+      _renderedBytes = null;
+      _renderStatus = _seedX != null ? 'Segmenting from tap…' : 'Detecting $_selectedSurface…';
+    });
     try {
       final maskBase64 = await ApiService().segmentWall(
         imageBase64: base64Encode(_srcJpeg!),
         surface: _selectedSurface,
+        seedX: _seedX,
+        seedY: _seedY,
       );
-      setState(() => _renderStatus = 'Painting…');
+      setState(() => _renderStatus = 'Applying color…');
       final maskBytes = base64Decode(maskBase64);
       final maskCodec = await ui.instantiateImageCodec(maskBytes);
       final maskFrame = await maskCodec.getNextFrame();
@@ -182,10 +194,16 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       if (mounted) setState(() => _renderedBytes = renderBd!.buffer.asUint8List());
     } catch (e, s) {
       debugPrint('[Render] $e\n$s');
-      if (mounted) setState(() => _renderStatus = 'Segmentation failed.\nCheck Railway logs.');
+      if (mounted) setState(() => _renderStatus = 'Failed: $e');
     } finally {
       if (mounted) setState(() => _rendering = false);
     }
+  }
+
+  void _onImageTap(TapUpDetails details, BoxConstraints box) {
+    final dx = (details.localPosition.dx / box.maxWidth).clamp(0.0, 1.0);
+    final dy = (details.localPosition.dy / box.maxHeight).clamp(0.0, 1.0);
+    _paint(seedX: dx, seedY: dy);
   }
 
   void _openColorPicker() async {
@@ -203,7 +221,9 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
         _selectedHex = result['hex']!;
         _selectedColorName = result['name']!;
       });
-      _paint();
+      if (_seedX != null) {
+        _paint(); // re-paint with same seed, new color
+      }
     }
   }
 
@@ -280,29 +300,67 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                     ])),
                   ])
                 : _renderedBytes != null
-                    ? _BeforeAfterSlider(
-                        before: _buildOriginalImage(),
-                        after: Image.memory(_renderedBytes!, fit: BoxFit.cover),
-                      )
-                    : Stack(fit: StackFit.expand, children: [
-                        _buildOriginalImage(),
-                        if (_renderStatus.isNotEmpty)
-                          Center(child: Container(
-                            margin: const EdgeInsets.all(20),
-                            padding: const EdgeInsets.all(16),
-                            decoration: BoxDecoration(
-                              color: AppColors.card,
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: AppColors.border)),
-                            child: Column(mainAxisSize: MainAxisSize.min, children: [
-                              Text(_renderStatus,
-                                style: const TextStyle(color: AppColors.textPrimary, fontSize: 12),
-                                textAlign: TextAlign.center),
-                              const SizedBox(height: 12),
-                              FilledButton(onPressed: _paint, child: const Text('Retry')),
-                            ]),
+                    ? Stack(children: [
+                        Positioned.fill(child: _BeforeAfterSlider(
+                          before: _buildOriginalImage(),
+                          after: Image.memory(_renderedBytes!, fit: BoxFit.cover),
+                        )),
+                        // Tap-again hint
+                        Positioned(top: 10, right: 10,
+                          child: GestureDetector(
+                            onTap: () => setState(() {
+                              _renderedBytes = null;
+                              _seedX = null;
+                              _seedY = null;
+                            }),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                              decoration: BoxDecoration(
+                                color: Colors.black54,
+                                borderRadius: BorderRadius.circular(12)),
+                              child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                                Icon(Icons.touch_app, color: AppColors.accent, size: 13),
+                                SizedBox(width: 4),
+                                Text('Re-tap', style: TextStyle(color: Colors.white, fontSize: 11)),
+                              ]),
+                            ),
                           )),
-                      ]),
+                      ])
+                    // ── Tap-to-paint mode ──
+                    : LayoutBuilder(builder: (ctx, box) => GestureDetector(
+                        onTapUp: (d) => _onImageTap(d, box),
+                        child: Stack(fit: StackFit.expand, children: [
+                          _buildOriginalImage(),
+                          Container(color: Colors.black.withValues(alpha: 0.35)),
+                          Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+                            Container(
+                              padding: const EdgeInsets.all(16),
+                              decoration: BoxDecoration(
+                                color: AppColors.accent,
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(Icons.touch_app, color: Colors.black, size: 28),
+                            ),
+                            const SizedBox(height: 12),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                              decoration: BoxDecoration(
+                                color: Colors.black54,
+                                borderRadius: BorderRadius.circular(20)),
+                              child: Text(
+                                'Tap the ${_selectedSurface} to paint it',
+                                style: const TextStyle(color: Colors.white,
+                                    fontSize: 14, fontWeight: FontWeight.w600),
+                              ),
+                            ),
+                            if (_renderStatus.isNotEmpty) ...[
+                              const SizedBox(height: 8),
+                              Text(_renderStatus,
+                                  style: const TextStyle(color: Colors.red, fontSize: 12)),
+                            ],
+                          ])),
+                        ]),
+                      )),
           ),
 
           // ── Controls panel ───────────────────────────────────────────────
@@ -347,8 +405,12 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                       padding: const EdgeInsets.only(right: 10),
                       child: GestureDetector(
                         onTap: _rendering ? null : () {
-                          setState(() => _selectedSurface = s.id);
-                          _paint();
+                          setState(() {
+                            _selectedSurface = s.id;
+                            _renderedBytes = null;
+                            _seedX = null;
+                            _seedY = null;
+                          });
                         },
                         child: AnimatedContainer(
                           duration: const Duration(milliseconds: 150),
