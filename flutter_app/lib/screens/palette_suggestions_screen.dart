@@ -63,7 +63,7 @@ class _PaletteSuggestionsScreenState extends State<PaletteSuggestionsScreen> {
         backgroundColor: AppColors.background,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios, color: AppColors.textPrimary, size: 18),
-          onPressed: () => context.pop(),
+          onPressed: () => context.go('/'),
         ),
         title: Text('Color Suggestions',
             style: GoogleFonts.playfairDisplay(color: AppColors.textPrimary, fontWeight: FontWeight.w600)),

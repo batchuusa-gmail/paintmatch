@@ -313,7 +313,7 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
         backgroundColor: AppColors.background,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios, color: AppColors.textPrimary, size: 18),
-          onPressed: () => context.pop(),
+          onPressed: () => context.go('/'),
         ),
         title: Text('Preview',
             style: GoogleFonts.playfairDisplay(color: AppColors.textPrimary, fontWeight: FontWeight.w600)),
