@@ -14,8 +14,22 @@ class SupabaseService {
   // -------------------------------------------------------------------------
   // Auth
   // -------------------------------------------------------------------------
-  Future<AuthResponse> signUp(String email, String password) =>
-      _sb.auth.signUp(email: email, password: password);
+  Future<AuthResponse> signUp(
+    String email,
+    String password, {
+    String? firstName,
+    String? lastName,
+    String? phone,
+  }) =>
+      _sb.auth.signUp(
+        email: email,
+        password: password,
+        data: {
+          if (firstName != null) 'first_name': firstName,
+          if (lastName != null) 'last_name': lastName,
+          if (phone != null) 'phone': phone,
+        },
+      );
 
   Future<AuthResponse> signIn(String email, String password) =>
       _sb.auth.signInWithPassword(email: email, password: password);

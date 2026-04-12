@@ -84,7 +84,8 @@ class ApiService {
   // Returns base64 PNG mask — white = target surface, black = everything else
   // surface: "wall" | "ceiling" | "floor"
   // -------------------------------------------------------------------------
-  Future<String> segmentWall({
+  /// Returns a map with keys: 'mask' (base64 PNG), 'coverage' (0.0–1.0), 'method'
+  Future<Map<String, dynamic>> segmentWall({
     required String imageBase64,
     String surface = 'wall',
     double? seedX,
@@ -103,7 +104,12 @@ class ApiService {
     );
     final json = jsonDecode(response.body) as Map<String, dynamic>;
     if (json['error'] != null) throw Exception(json['error']);
-    return (json['data'] as Map<String, dynamic>)['mask'] as String;
+    final data = json['data'] as Map<String, dynamic>;
+    return {
+      'mask':     data['mask'] as String,
+      'coverage': (data['coverage'] as num?)?.toDouble() ?? 0.0,
+      'method':   data['method'] as String? ?? 'unknown',
+    };
   }
 
   // -------------------------------------------------------------------------

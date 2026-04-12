@@ -1,13 +1,22 @@
 """
 POST /segment-wall
 Uses Meta SAM 2 via Replicate (meta/sam-2).
-Strategy: run SAM auto-segmentation → get all individual masks →
-pick the mask whose area covers the user's tap point (seed_x, seed_y).
-This gives professional-quality, edge-accurate segmentation.
-Falls back to BFS if Replicate fails.
+
+Strategy (in priority order):
+1. SAM auto-segmentation → pick masks with:
+   a. Area 4%–70% of image (excludes switches/frames/pillows AND full-scene masks)
+   b. Among those covering the tap point: sort by color distance to tap pixel
+   c. Merge all masks within distance threshold to reconstruct fragmented walls
+2. Radius search — if no mask at exact tap pixel, scan a 5% radius
+3. BFS fallback — flood-fill from tap using SLIC superpixels + color similarity
+
+Root fix: the previous "largest mask at tap point" picked switches/frames because
+SAM fragments walls into many small pieces each < 1%, while a switch is one clean 1%
+mask that happens to be the only mask at the exact tap pixel.
 """
 import base64
 import io
+import json
 import os
 from collections import deque
 
@@ -19,7 +28,20 @@ from PIL import Image, ImageFilter, ImageOps
 segment_wall_bp = Blueprint("segment_wall", __name__)
 
 SAM2_VERSION = "fe97b453a6455861e3bac769b441ca1f1086110da7466dbb65cf1eecfd60dc83"
-WORK_SIZE    = 1024  # longest edge — SAM works best at higher res
+WORK_SIZE    = 1024   # longest edge — SAM works best at higher res
+
+# Area bounds: walls/ceilings/floors are always in this range of image pixels.
+# Switches, outlets, frames, pillows are < 3%.
+# Full-scene/background masks (the "entire room") are > 70%.
+MIN_AREA_FRAC = 0.04   # 4% minimum
+MAX_AREA_FRAC = 0.70   # 70% maximum
+
+# How many pixels around the tap to search if no mask covers the exact tap point
+SEARCH_RADIUS_FRAC = 0.05  # 5% of shortest image dimension
+
+# Color merge: masks whose avg color is within this RGB Euclidean distance
+# of the tap pixel's color are treated as "same surface" and merged
+COLOR_MERGE_THRESH = 35.0   # out of 255 per channel (≈ 20 Delta-E equivalent)
 
 
 def _resize_to(pil: Image.Image, max_edge: int) -> Image.Image:
@@ -45,12 +67,24 @@ def _upload_to_replicate(pil: Image.Image, token: str) -> str:
     return resp.json()["urls"]["get"]
 
 
+def _rgb_dist(a: np.ndarray, b: np.ndarray) -> float:
+    """Euclidean distance in RGB space (values 0–255)."""
+    return float(np.linalg.norm(a.astype(float) - b.astype(float)))
+
+
 def _sam_segment(pil: Image.Image, seed_x: float, seed_y: float) -> Image.Image:
     """
-    1. Upload image to Replicate.
-    2. Run SAM 2 auto-segmentation (returns individual_masks).
-    3. Pick the mask that contains pixel (seed_x*W, seed_y*H).
-    4. Return that mask resized to original pil size.
+    Run SAM 2 auto-segmentation, then pick the mask that best represents
+    the large flat surface (wall/ceiling/floor) at the tap point.
+
+    Selection logic:
+    1. Download all SAM masks.
+    2. Reject masks outside [MIN_AREA_FRAC, MAX_AREA_FRAC] — removes small objects.
+    3. Among remaining masks that cover the tap pixel exactly:
+       - Score by color distance (mask avg color vs tap pixel color)
+       - Merge all masks whose avg color is close to the tap pixel's color
+    4. If no large mask covers the exact tap pixel, search SEARCH_RADIUS_FRAC radius.
+    5. Last resort: BFS flood-fill.
     """
     import replicate
 
@@ -62,13 +96,16 @@ def _sam_segment(pil: Image.Image, seed_x: float, seed_y: float) -> Image.Image:
     image_url = _upload_to_replicate(work, token)
 
     client = replicate.Client(api_token=token)
+
+    # Lower thresholds vs. previous version so walls (which have variable
+    # texture/lighting) are more likely to be represented as individual masks
     output = client.run(
         f"meta/sam-2:{SAM2_VERSION}",
         input={
             "image":                  image_url,
             "points_per_side":        32,
-            "pred_iou_thresh":        0.88,
-            "stability_score_thresh": 0.92,
+            "pred_iou_thresh":        0.80,   # was 0.88 — more permissive
+            "stability_score_thresh": 0.85,   # was 0.92 — more permissive
             "use_m2m":                True,
         },
     )
@@ -77,56 +114,85 @@ def _sam_segment(pil: Image.Image, seed_x: float, seed_y: float) -> Image.Image:
     if not individual_masks:
         raise RuntimeError("SAM returned no masks")
 
-    # Tap point in work-image pixel coords
     ww, wh = work.size
     tx = int(seed_x * ww)
     ty = int(seed_y * wh)
+    total_pix = ww * wh
 
-    # Download all masks, find ones that cover the tap point
-    candidates = []   # (area, mask_pil)
-    all_masks  = []   # (area, mask_pil) — for centroid fallback
+    # RGB value at the exact tap pixel (used for color-distance scoring)
+    work_rgb = np.array(work.convert("RGB"))
+    tap_rgb  = work_rgb[ty, tx].astype(float)
 
+    # Download all masks once and compute stats
+    mask_data = []  # (area_frac, arr, mask_pil, avg_rgb)
     for mask_url in individual_masks:
-        resp = req.get(str(mask_url), timeout=30)
-        resp.raise_for_status()
-        m = Image.open(io.BytesIO(resp.content)).convert("L")
+        try:
+            resp = req.get(str(mask_url), timeout=30)
+            resp.raise_for_status()
+            m = Image.open(io.BytesIO(resp.content)).convert("L")
+        except Exception:
+            continue
         if m.size != work.size:
             m = m.resize(work.size, Image.NEAREST)
-        arr = np.array(m)
-        area = int((arr > 127).sum())
-        all_masks.append((area, m))
-        if arr[ty, tx] > 127:
-            candidates.append((area, m))
+        arr      = np.array(m)
+        area     = int((arr > 127).sum())
+        area_frac = area / total_pix
+        # Average color of ALL pixels inside this mask
+        px       = work_rgb[arr > 127]
+        avg_rgb  = px.mean(axis=0) if len(px) > 0 else np.zeros(3)
+        mask_data.append((area_frac, arr, m, avg_rgb))
 
-    # Among masks that cover the tap, pick the LARGEST one.
-    # Walls are large surfaces; switches/outlets are tiny objects in front of walls.
-    # The largest mask at the tap point is almost always the wall/ceiling/floor.
-    best_mask_pil = None
-    best_area     = None
+    # ── Step 1: candidates that cover the tap pixel AND are the right size ─────
+    candidates = [
+        (af, arr, m, avg) for af, arr, m, avg in mask_data
+        if arr[ty, tx] > 127
+        and MIN_AREA_FRAC <= af <= MAX_AREA_FRAC
+    ]
+
     if candidates:
-        # Sort by area descending, take the largest
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        best_area, best_mask_pil = candidates[0]
+        # Sort by color distance to tap pixel — mask whose avg color is
+        # most similar to tap pixel is most likely the same surface
+        candidates.sort(key=lambda x: _rgb_dist(x[3], tap_rgb))
 
-    if best_mask_pil is None:
-        # No mask covers the tap → pick the largest mask whose centroid is closest
-        best_dist = float("inf")
-        for area, m in all_masks:
-            arr = np.array(m)
-            ys, xs = np.where(arr > 127)
-            if len(xs) == 0:
-                continue
-            cx, cy = float(xs.mean()), float(ys.mean())
-            dist = ((cx - tx) ** 2 + (cy - ty) ** 2) ** 0.5
-            if dist < best_dist:
-                best_dist = dist
-                best_mask_pil = m
+        # Merge all candidates whose avg color is within COLOR_MERGE_THRESH
+        # This reconstructs walls that SAM fragmented into multiple pieces
+        base_color = candidates[0][3]
+        union_arr  = np.zeros((wh, ww), dtype=np.uint8)
+        merged     = 0
+        for af, arr, m, avg in candidates:
+            if _rgb_dist(avg, base_color) <= COLOR_MERGE_THRESH:
+                union_arr = np.maximum(union_arr, (arr > 127).astype(np.uint8) * 255)
+                merged += 1
 
-    if best_mask_pil is None:
-        raise RuntimeError("Could not select a mask from SAM output")
+        if merged > 0:
+            merged_pil = Image.fromarray(union_arr, "L")
+            return merged_pil.resize(pil.size, Image.NEAREST)
 
-    # Resize back to original image resolution
-    return best_mask_pil.resize(pil.size, Image.NEAREST)
+    # ── Step 2: no large mask at exact tap — search nearby ────────────────────
+    search_r = max(10, int(min(ww, wh) * SEARCH_RADIUS_FRAC))
+    y0 = max(0,  ty - search_r);  y1 = min(wh, ty + search_r)
+    x0 = max(0,  tx - search_r);  x1 = min(ww, tx + search_r)
+
+    # Find all large masks that are active anywhere in the search square,
+    # sort by color similarity to tap pixel
+    nearby = [
+        (af, arr, m, avg) for af, arr, m, avg in mask_data
+        if MIN_AREA_FRAC <= af <= MAX_AREA_FRAC
+        and (arr[y0:y1, x0:x1] > 127).any()
+    ]
+    if nearby:
+        nearby.sort(key=lambda x: _rgb_dist(x[3], tap_rgb))
+        # Merge color-similar nearby masks
+        base_color = nearby[0][3]
+        union_arr  = np.zeros((wh, ww), dtype=np.uint8)
+        for af, arr, m, avg in nearby:
+            if _rgb_dist(avg, base_color) <= COLOR_MERGE_THRESH:
+                union_arr = np.maximum(union_arr, (arr > 127).astype(np.uint8) * 255)
+        if union_arr.max() > 0:
+            return Image.fromarray(union_arr, "L").resize(pil.size, Image.NEAREST)
+
+    # ── Step 3: BFS fallback ──────────────────────────────────────────────────
+    raise RuntimeError("No suitable mask found — BFS fallback required")
 
 
 # ─── BFS fallback ────────────────────────────────────────────────────────────
@@ -233,9 +299,13 @@ def _segment_auto(pil: Image.Image, surface: str) -> Image.Image:
 
 
 def _clean(mask: Image.Image) -> Image.Image:
-    b = mask.filter(ImageFilter.GaussianBlur(radius=3))
-    b = b.point(lambda p: 255 if p > 100 else 0)
-    return b.filter(ImageFilter.MinFilter(size=3))
+    """
+    Smooth mask edges without shrinking them.
+    Previously used MinFilter (erosion) which ate wall boundaries — removed.
+    Now uses blur + threshold only, producing clean edges without shrinkage.
+    """
+    b = mask.filter(ImageFilter.GaussianBlur(radius=2))
+    return b.point(lambda p: 255 if p > 100 else 0)
 
 
 # ─── Route ───────────────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:io';
 import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
@@ -196,20 +197,44 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
     setState(() {
       _rendering = true;
       _renderedBytes = null;
-      _renderStatus = isNewTap ? 'Segmenting wall…' : 'Applying color…';
+      _renderStatus = isNewTap ? 'Segmenting surface…' : 'Applying color…';
     });
 
     try {
       // Only call SAM on a new tap — reuse cached mask for color changes
       if (isNewTap || _cachedMaskRgba == null) {
         setState(() => _renderStatus = 'Analyzing surface… (10–15s first time)');
-        final maskBase64 = await ApiService().segmentWall(
+        final result = await ApiService().segmentWall(
           imageBase64: base64Encode(_srcJpeg!),
           surface: _selectedSurface,
           seedX: _seedX,
           seedY: _seedY,
         );
-        final maskBytes = base64Decode(maskBase64);
+        final maskBytes = base64Decode(result['mask'] as String);
+        final coverage  = (result['coverage'] as double?) ?? 0.0;
+
+        // Coverage < 3% means a tiny object (switch/frame/pillow) was hit, not a wall.
+        // Warn the user immediately before painting.
+        if (coverage < 0.03 && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text(
+                'That looks like a small object, not a wall.\n'
+                'Tap on a plain open wall area for best results.',
+              ),
+              backgroundColor: Colors.orange.shade800,
+              duration: const Duration(seconds: 4),
+              action: SnackBarAction(
+                label: 'OK',
+                textColor: Colors.white,
+                onPressed: () {},
+              ),
+            ),
+          );
+          setState(() { _rendering = false; _renderStatus = ''; });
+          return;
+        }
+
         final maskCodec = await ui.instantiateImageCodec(maskBytes);
         final maskFrame = await maskCodec.getNextFrame();
         final maskImg   = maskFrame.image;
@@ -243,8 +268,26 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   }
 
   void _onImageTap(TapUpDetails details, BoxConstraints box) {
-    final dx = (details.localPosition.dx / box.maxWidth).clamp(0.0, 1.0);
-    final dy = (details.localPosition.dy / box.maxHeight).clamp(0.0, 1.0);
+    // BoxFit.cover crops the image — correct tap coords to image space.
+    // Without this, tapping the wall on a portrait photo sends wrong
+    // coordinates to SAM (e.g. hits a switch instead of the wall).
+    double dx, dy;
+    if (_srcImage != null) {
+      final imgW = _srcImage!.width.toDouble();
+      final imgH = _srcImage!.height.toDouble();
+      final boxW = box.maxWidth;
+      final boxH = box.maxHeight;
+      final scale = math.max(boxW / imgW, boxH / imgH);
+      final scaledW = imgW * scale;
+      final scaledH = imgH * scale;
+      final cropX = (scaledW - boxW) / 2;
+      final cropY = (scaledH - boxH) / 2;
+      dx = ((details.localPosition.dx + cropX) / scaledW).clamp(0.0, 1.0);
+      dy = ((details.localPosition.dy + cropY) / scaledH).clamp(0.0, 1.0);
+    } else {
+      dx = (details.localPosition.dx / box.maxWidth).clamp(0.0, 1.0);
+      dy = (details.localPosition.dy / box.maxHeight).clamp(0.0, 1.0);
+    }
     _paint(seedX: dx, seedY: dy);
   }
 
