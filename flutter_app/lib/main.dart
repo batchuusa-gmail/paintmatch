@@ -17,6 +17,7 @@ import 'screens/project_board_screen.dart';
 import 'screens/onboarding_screen.dart';
 import 'screens/paywall_screen.dart';
 import 'services/subscription_service.dart';
+import 'models/paint_color.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -69,6 +70,7 @@ final GoRouter _router = GoRouter(
         selectedColorName: args['selectedColorName'],
         imageFile: args['imageFile'],
         wallHex: args['wallHex'] as String?,
+        vendorMatches: args['vendorMatches'] as List<PaintColor>?,
       );
     }),
     GoRoute(path: '/projects',   builder: (_, __) => const AuthWrapper(

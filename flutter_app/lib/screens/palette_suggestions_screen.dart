@@ -150,46 +150,77 @@ class _PaletteSuggestionsScreenState extends State<PaletteSuggestionsScreen> {
 
             const SizedBox(height: 24),
 
-            // Cost estimate + Preview CTAs
+            // ── Cost Estimate card ──────────────────────────────────────────
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // Cost estimate button (only when vendor data loaded)
-                  if (_vendorMatches != null && _vendorMatches!.isNotEmpty)
-                    OutlinedButton.icon(
-                      icon: const Icon(Icons.calculate_outlined, color: AppColors.accent, size: 18),
-                      label: const Text('Estimate Paint & Labour Cost',
-                          style: TextStyle(color: AppColors.accent, fontSize: 14)),
-                      onPressed: () => showCostEstimateSheet(
-                        context,
-                        vendorMatches: _vendorMatches!,
-                        paletteName: _selected.name,
+              child: GestureDetector(
+                onTap: () => showCostEstimateSheet(
+                  context,
+                  vendorMatches: _vendorMatches ?? [],
+                  paletteName: _selected.name,
+                ),
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: AppColors.card,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: AppColors.accent.withValues(alpha: 0.35)),
+                  ),
+                  child: Row(children: [
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: AppColors.accentDim,
+                        borderRadius: BorderRadius.circular(12),
                       ),
-                      style: OutlinedButton.styleFrom(
-                        minimumSize: const Size.fromHeight(48),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-                        side: const BorderSide(color: AppColors.accent),
+                      child: const Icon(Icons.calculate_outlined,
+                          color: AppColors.accent, size: 22),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('Paint & Labour Cost',
+                              style: TextStyle(
+                                  color: AppColors.textPrimary,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 15)),
+                          const SizedBox(height: 2),
+                          Text(
+                            _vendorMatches != null && _vendorMatches!.isNotEmpty
+                                ? 'Tap to estimate total project cost'
+                                : 'Tap to estimate — vendor data loading…',
+                            style: const TextStyle(
+                                color: AppColors.textSecondary, fontSize: 12),
+                          ),
+                        ],
                       ),
                     ),
-                  if (_vendorMatches != null && _vendorMatches!.isNotEmpty)
-                    const SizedBox(height: 12),
+                    const Icon(Icons.chevron_right,
+                        color: AppColors.accent, size: 20),
+                  ]),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
 
-                  FilledButton.icon(
-                    icon: const Icon(Icons.visibility, color: Colors.black),
-                    label: const Text('Preview in Your Room'),
-                    onPressed: () => context.push('/preview', extra: {
-                      'originalImageUrl': widget.imageFile.path,
-                      'renderedImageUrl': null,
-                      'selectedHex': _selected.hex,
-                      'selectedColorName': _selected.name,
-                      'imageFile': widget.imageFile,
-                      'wallHex': widget.analysis.wallHex,
-                      'finish': 'eggshell',
-                    }),
-                  ),
-                ],
+            // ── Preview CTA ─────────────────────────────────────────────────
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: FilledButton.icon(
+                icon: const Icon(Icons.visibility, color: Colors.black),
+                label: const Text('Preview in Your Room'),
+                onPressed: () => context.push('/preview', extra: {
+                  'originalImageUrl': widget.imageFile.path,
+                  'renderedImageUrl': null,
+                  'selectedHex': _selected.hex,
+                  'selectedColorName': _selected.name,
+                  'imageFile': widget.imageFile,
+                  'wallHex': widget.analysis.wallHex,
+                  'finish': 'eggshell',
+                  'vendorMatches': _vendorMatches,
+                }),
               ),
             ),
             const SizedBox(height: 40),

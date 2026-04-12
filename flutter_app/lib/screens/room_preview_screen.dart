@@ -15,6 +15,7 @@ import '../models/paint_color.dart';
 import '../services/api_service.dart';
 import '../services/supabase_service.dart';
 import '../utils/color_ext.dart';
+import '../widgets/cost_estimate_sheet.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Surface definitions
@@ -207,6 +208,7 @@ class RoomPreviewScreen extends StatefulWidget {
   final String selectedColorName;
   final File? imageFile;
   final String? wallHex;
+  final List<PaintColor>? vendorMatches;  // passed from palette screen for cost estimate
 
   const RoomPreviewScreen({
     super.key,
@@ -216,6 +218,7 @@ class RoomPreviewScreen extends StatefulWidget {
     required this.selectedColorName,
     this.imageFile,
     this.wallHex,
+    this.vendorMatches,
   });
 
   @override
@@ -723,15 +726,42 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
           Container(
             color: AppColors.bottomNav,
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
-            child: FilledButton.icon(
-              icon: _saving
-                  ? const SizedBox(width: 16, height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
-                  : const Icon(Icons.bookmark_add_outlined, size: 18, color: Colors.black),
-              label: const Text('Save to Project'),
-              onPressed: _saving ? null : _saveToProject,
-              style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
-            ),
+            child: Row(children: [
+              // Cost estimate button
+              Expanded(
+                child: OutlinedButton.icon(
+                  icon: const Icon(Icons.calculate_outlined,
+                      color: AppColors.accent, size: 18),
+                  label: const Text('Cost',
+                      style: TextStyle(color: AppColors.accent, fontSize: 14)),
+                  onPressed: () => showCostEstimateSheet(
+                    context,
+                    vendorMatches: widget.vendorMatches ?? [],
+                    paletteName: _selectedColorName,
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(0, 48),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                    side: const BorderSide(color: AppColors.accent),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              // Save button
+              Expanded(
+                flex: 2,
+                child: FilledButton.icon(
+                  icon: _saving
+                      ? const SizedBox(width: 16, height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
+                      : const Icon(Icons.bookmark_add_outlined, size: 18, color: Colors.black),
+                  label: const Text('Save to Project'),
+                  onPressed: _saving ? null : _saveToProject,
+                  style: FilledButton.styleFrom(minimumSize: const Size(0, 48)),
+                ),
+              ),
+            ]),
           ),
         ],
       ),
