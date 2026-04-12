@@ -114,6 +114,90 @@ Uint8List _blendIsolate(_BlendParams p) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// On-device BFS segmentation (fast mode — no network, <200ms)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _BfsParams {
+  final Uint8List srcRgba;
+  final int srcW, srcH;
+  final int seedX, seedY;
+  const _BfsParams({
+    required this.srcRgba, required this.srcW, required this.srcH,
+    required this.seedX,   required this.seedY,
+  });
+}
+
+/// Flood-fill from (seedX, seedY) using RGB color similarity.
+/// Returns a 4-channel RGBA mask (same size as src) compatible with _blendIsolate.
+/// Tolerance is adaptive: derived from local color variance around the seed
+/// so flat walls get a tight fill and textured surfaces get a looser one.
+Uint8List _bfsIsolate(_BfsParams p) {
+  final src  = p.srcRgba;
+  final W    = p.srcW;
+  final H    = p.srcH;
+  final total = W * H;
+
+  // ── 1. Sample seed color ─────────────────────────────────────────────────
+  final si = (p.seedY * W + p.seedX) * 4;
+  final seedR = src[si].toDouble();
+  final seedG = src[si + 1].toDouble();
+  final seedB = src[si + 2].toDouble();
+
+  // ── 2. Adaptive tolerance from 15×15 local neighbourhood ─────────────────
+  double variance = 0; int count = 0;
+  for (int dy = -7; dy <= 7; dy++) {
+    for (int dx = -7; dx <= 7; dx++) {
+      final nx = (p.seedX + dx).clamp(0, W - 1);
+      final ny = (p.seedY + dy).clamp(0, H - 1);
+      final pi = (ny * W + nx) * 4;
+      final dr = src[pi]     - seedR;
+      final dg = src[pi + 1] - seedG;
+      final db = src[pi + 2] - seedB;
+      variance += dr*dr + dg*dg + db*db;
+      count++;
+    }
+  }
+  variance /= (count * 3);  // avg per-channel squared deviation
+  // tolerance range 22–58: tight for flat painted walls, loose for textured
+  final tolerance = (22.0 + math.sqrt(variance)).clamp(22.0, 58.0);
+  final tolSq     = tolerance * tolerance * 3;  // squared, 3 channels
+
+  // ── 3. BFS with a pre-allocated Int32List ring buffer ────────────────────
+  final mask    = Uint8List(total * 4);   // RGBA output — 0 everywhere
+  final visited = Uint8List(total);       // 0=unseen 1=seen
+  final queue   = Int32List(total);       // pixel indices
+  int   qHead = 0, qTail = 0;
+
+  final seedPx = p.seedY * W + p.seedX;
+  visited[seedPx] = 1;
+  queue[qTail++]  = seedPx;
+
+  while (qHead < qTail) {
+    final px = queue[qHead++];
+    final pi = px * 4;
+
+    final dr = src[pi]     - seedR;
+    final dg = src[pi + 1] - seedG;
+    final db = src[pi + 2] - seedB;
+    if (dr*dr + dg*dg + db*db > tolSq) continue;
+
+    // Mark as painted
+    mask[pi] = mask[pi + 1] = mask[pi + 2] = mask[pi + 3] = 255;
+
+    final x = px % W;
+    final y = px ~/ W;
+
+    // 4-connected neighbours
+    if (x > 0)     { final n = px - 1; if (visited[n] == 0) { visited[n] = 1; queue[qTail++] = n; } }
+    if (x < W - 1) { final n = px + 1; if (visited[n] == 0) { visited[n] = 1; queue[qTail++] = n; } }
+    if (y > 0)     { final n = px - W; if (visited[n] == 0) { visited[n] = 1; queue[qTail++] = n; } }
+    if (y < H - 1) { final n = px + W; if (visited[n] == 0) { visited[n] = 1; queue[qTail++] = n; } }
+  }
+
+  return mask;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Widget
 // ─────────────────────────────────────────────────────────────────────────────
 class RoomPreviewScreen extends StatefulWidget {
@@ -144,6 +228,7 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   String _renderStatus = '';
   String _environment = 'interior';
   String _selectedSurface = 'wall';
+  bool _precisionMode = false;  // false = fast on-device BFS, true = SAM via API
 
   late String _selectedHex;
   late String _selectedColorName;
@@ -189,60 +274,67 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   }
 
   Future<void> _paint({double? seedX, double? seedY}) async {
-    if (_srcImage == null || _srcRgba == null || _srcJpeg == null) return;
+    if (_srcImage == null || _srcRgba == null) return;
 
     final isNewTap = seedX != null || seedY != null;
     if (seedX != null) _seedX = seedX;
     if (seedY != null) _seedY = seedY;
+    if (_seedX == null || _seedY == null) return;
 
     setState(() {
       _rendering = true;
       _renderedBytes = null;
-      _renderStatus = isNewTap ? 'Segmenting surface…' : 'Applying color…';
+      _renderStatus = _precisionMode ? 'Analyzing surface… (10–15s)' : 'Painting…';
     });
 
     try {
-      // Only call SAM on a new tap — reuse cached mask for color changes
       if (isNewTap || _cachedMaskRgba == null) {
-        setState(() => _renderStatus = 'Analyzing surface… (10–15s first time)');
-        final result = await ApiService().segmentWall(
-          imageBase64: base64Encode(_srcJpeg!),
-          surface: _selectedSurface,
-          seedX: _seedX,
-          seedY: _seedY,
-        );
-        final maskBytes = base64Decode(result['mask'] as String);
-        final coverage  = (result['coverage'] as double?) ?? 0.0;
+        if (_precisionMode) {
+          // ── Precision mode: SAM 2 via backend ─────────────────────────────
+          if (_srcJpeg == null) return;
+          final result = await ApiService().segmentWall(
+            imageBase64: base64Encode(_srcJpeg!),
+            surface: _selectedSurface,
+            seedX: _seedX,
+            seedY: _seedY,
+          );
+          final maskBytes = base64Decode(result['mask'] as String);
+          final coverage  = (result['coverage'] as double?) ?? 0.0;
 
-        // Coverage < 3% means a tiny object (switch/frame/pillow) was hit, not a wall.
-        // Warn the user immediately before painting.
-        if (coverage < 0.03 && mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
+          if (coverage < 0.03 && mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
               content: const Text(
                 'That looks like a small object, not a wall.\n'
-                'Tap on a plain open wall area for best results.',
-              ),
+                'Tap on a plain open wall area for best results.'),
               backgroundColor: Colors.orange.shade800,
               duration: const Duration(seconds: 4),
-              action: SnackBarAction(
-                label: 'OK',
-                textColor: Colors.white,
-                onPressed: () {},
-              ),
-            ),
-          );
-          setState(() { _rendering = false; _renderStatus = ''; });
-          return;
-        }
+            ));
+            setState(() { _rendering = false; _renderStatus = ''; });
+            return;
+          }
 
-        final maskCodec = await ui.instantiateImageCodec(maskBytes);
-        final maskFrame = await maskCodec.getNextFrame();
-        final maskImg   = maskFrame.image;
-        final maskBd    = await maskImg.toByteData(format: ui.ImageByteFormat.rawRgba);
-        _cachedMaskRgba = maskBd!.buffer.asUint8List();
-        _cachedMaskW    = maskImg.width;
-        _cachedMaskH    = maskImg.height;
+          final maskCodec = await ui.instantiateImageCodec(maskBytes);
+          final maskFrame = await maskCodec.getNextFrame();
+          final maskImg   = maskFrame.image;
+          final maskBd    = await maskImg.toByteData(format: ui.ImageByteFormat.rawRgba);
+          _cachedMaskRgba = maskBd!.buffer.asUint8List();
+          _cachedMaskW    = maskImg.width;
+          _cachedMaskH    = maskImg.height;
+        } else {
+          // ── Fast mode: on-device BFS — no network, <200ms ─────────────────
+          final imgW = _srcImage!.width;
+          final imgH = _srcImage!.height;
+          final sx   = (_seedX! * imgW).round().clamp(0, imgW - 1);
+          final sy   = (_seedY! * imgH).round().clamp(0, imgH - 1);
+
+          final maskRgba = await compute(_bfsIsolate, _BfsParams(
+            srcRgba: _srcRgba!, srcW: imgW, srcH: imgH,
+            seedX: sx, seedY: sy,
+          ));
+          _cachedMaskRgba = maskRgba;
+          _cachedMaskW    = imgW;
+          _cachedMaskH    = imgH;
+        }
       }
 
       setState(() => _renderStatus = 'Applying color…');
@@ -256,7 +348,8 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       ));
 
       final c = Completer<ui.Image>();
-      ui.decodeImageFromPixels(out, _srcImage!.width, _srcImage!.height, ui.PixelFormat.rgba8888, c.complete);
+      ui.decodeImageFromPixels(
+          out, _srcImage!.width, _srcImage!.height, ui.PixelFormat.rgba8888, c.complete);
       final rendered = await c.future;
       final renderBd = await rendered.toByteData(format: ui.ImageByteFormat.png);
       if (mounted) setState(() => _renderedBytes = renderBd!.buffer.asUint8List());
@@ -480,6 +573,51 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                   ]),
 
                   const SizedBox(height: 24),
+
+                  // Fast / Precision toggle
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Row(children: [
+                        Icon(
+                          _precisionMode ? Icons.hdr_on_outlined : Icons.bolt,
+                          size: 14,
+                          color: _precisionMode ? AppColors.accent : Colors.green.shade400,
+                        ),
+                        const SizedBox(width: 5),
+                        Text(
+                          _precisionMode ? 'Precision (SAM AI)' : 'Fast Mode',
+                          style: TextStyle(
+                            color: _precisionMode ? AppColors.accent : Colors.green.shade400,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          _precisionMode ? '~15s' : '< 1s',
+                          style: TextStyle(
+                              color: AppColors.textSecondary.withValues(alpha: 0.6),
+                              fontSize: 11),
+                        ),
+                      ]),
+                      Switch.adaptive(
+                        value: _precisionMode,
+                        activeColor: AppColors.accent,
+                        onChanged: _rendering ? null : (v) {
+                          setState(() {
+                            _precisionMode = v;
+                            // Clear cached mask — different algorithm = different mask
+                            _cachedMaskRgba = null;
+                            _renderedBytes  = null;
+                            _seedX = null;
+                            _seedY = null;
+                          });
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
 
                   // What to Paint
                   const Text('What to Paint',
