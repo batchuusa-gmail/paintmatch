@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 
 import '../../config/app_theme.dart';
 import '../../services/supabase_service.dart';
+import '../../services/biometric_service.dart';
 
 class SignupScreen extends StatefulWidget {
   const SignupScreen({super.key});
@@ -23,13 +24,21 @@ class _SignupScreenState extends State<SignupScreen> {
   Future<void> _signUp() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _loading = true);
+    final email = _emailCtrl.text.trim();
+    final password = _passCtrl.text;
     try {
-      await SupabaseService().signUp(_emailCtrl.text.trim(), _passCtrl.text);
+      await SupabaseService().signUp(email, password);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Account created! Check your email to confirm.')),
         );
-        context.go('/login');
+        // Offer Face ID setup
+        final available = await BiometricService().isAvailable();
+        if (mounted && available) {
+          _offerBiometricSetup(email, password);
+        } else if (mounted) {
+          context.go('/login');
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -40,6 +49,40 @@ class _SignupScreenState extends State<SignupScreen> {
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  void _offerBiometricSetup(String email, String password) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppColors.card,
+        title: Text('Enable Face ID?',
+            style: GoogleFonts.playfairDisplay(color: AppColors.textPrimary)),
+        content: const Text(
+          'Sign in faster next time using Face ID instead of your password.',
+          style: TextStyle(color: AppColors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              context.go('/login');
+            },
+            child: const Text('Skip', style: TextStyle(color: AppColors.textSecondary)),
+          ),
+          TextButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              await BiometricService().saveBiometricEnabled(email, password);
+              if (context.mounted) context.go('/login');
+            },
+            child: const Text('Enable Face ID',
+                style: TextStyle(color: AppColors.accent, fontWeight: FontWeight.w600)),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _signUpWithGoogle() async {

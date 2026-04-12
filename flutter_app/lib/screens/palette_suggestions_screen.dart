@@ -8,6 +8,7 @@ import '../models/room_analysis.dart';
 import '../models/paint_color.dart';
 import '../services/api_service.dart';
 import '../widgets/vendor_comparison_card.dart';
+import '../widgets/cost_estimate_sheet.dart';
 import '../utils/color_ext.dart';
 
 class PaletteSuggestionsScreen extends StatefulWidget {
@@ -149,21 +150,46 @@ class _PaletteSuggestionsScreenState extends State<PaletteSuggestionsScreen> {
 
             const SizedBox(height: 24),
 
-            // Preview CTA
+            // Cost estimate + Preview CTAs
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: FilledButton.icon(
-                icon: const Icon(Icons.visibility, color: Colors.black),
-                label: const Text('Preview in Your Room'),
-                onPressed: () => context.push('/preview', extra: {
-                  'originalImageUrl': widget.imageFile.path,
-                  'renderedImageUrl': null,
-                  'selectedHex': _selected.hex,
-                  'selectedColorName': _selected.name,
-                  'imageFile': widget.imageFile,
-                  'wallHex': widget.analysis.wallHex,
-                  'finish': 'eggshell',
-                }),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // Cost estimate button (only when vendor data loaded)
+                  if (_vendorMatches != null && _vendorMatches!.isNotEmpty)
+                    OutlinedButton.icon(
+                      icon: const Icon(Icons.calculate_outlined, color: AppColors.accent, size: 18),
+                      label: const Text('Estimate Paint & Labour Cost',
+                          style: TextStyle(color: AppColors.accent, fontSize: 14)),
+                      onPressed: () => showCostEstimateSheet(
+                        context,
+                        vendorMatches: _vendorMatches!,
+                        paletteName: _selected.name,
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        minimumSize: const Size.fromHeight(48),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                        side: const BorderSide(color: AppColors.accent),
+                      ),
+                    ),
+                  if (_vendorMatches != null && _vendorMatches!.isNotEmpty)
+                    const SizedBox(height: 12),
+
+                  FilledButton.icon(
+                    icon: const Icon(Icons.visibility, color: Colors.black),
+                    label: const Text('Preview in Your Room'),
+                    onPressed: () => context.push('/preview', extra: {
+                      'originalImageUrl': widget.imageFile.path,
+                      'renderedImageUrl': null,
+                      'selectedHex': _selected.hex,
+                      'selectedColorName': _selected.name,
+                      'imageFile': widget.imageFile,
+                      'wallHex': widget.analysis.wallHex,
+                      'finish': 'eggshell',
+                    }),
+                  ),
+                ],
               ),
             ),
             const SizedBox(height: 40),

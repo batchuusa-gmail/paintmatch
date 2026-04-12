@@ -2,6 +2,7 @@
 PM-12: POST /match-colors
 Accepts a HEX color, returns top-N closest matches per vendor using Delta-E CIE2000.
 """
+from typing import Optional
 from flask import Blueprint, request, jsonify
 
 from utils.color_utils import group_by_vendor, is_valid_hex
@@ -9,7 +10,7 @@ from utils.supabase_client import get_supabase
 
 match_colors_bp = Blueprint("match_colors", __name__)
 
-_color_cache: list | None = None
+_color_cache: Optional[list] = None
 
 
 def _load_all_colors() -> list:
