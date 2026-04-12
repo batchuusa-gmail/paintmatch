@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:shimmer/shimmer.dart';
 
 import '../services/api_service.dart';
+import '../services/subscription_service.dart';
 
 class AnalysisLoadingScreen extends StatefulWidget {
   final File imageFile;
@@ -27,6 +28,8 @@ class _AnalysisLoadingScreenState extends State<AnalysisLoadingScreen> {
     try {
       setState(() => _status = 'Detecting wall colors and room style...');
       final analysis = await ApiService().analyzeRoom(widget.imageFile);
+      // Deduct one trial analysis on successful completion
+      await SubscriptionService().recordAnalysis();
 
       setState(() => _status = 'Building color palettes...');
       await Future.delayed(const Duration(milliseconds: 600));

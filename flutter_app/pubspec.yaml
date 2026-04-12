@@ -46,6 +46,12 @@ dependencies:
   # Biometric / Face ID authentication
   local_auth: ^2.3.0
 
+  # Trial + subscription state persistence
+  shared_preferences: ^2.3.2
+
+  # In-app purchases (iOS + Android)
+  in_app_purchase: ^3.2.0
+
   # Google Fonts
   google_fonts: ^6.2.1
 

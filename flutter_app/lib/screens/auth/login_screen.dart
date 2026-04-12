@@ -5,6 +5,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../config/app_theme.dart';
 import '../../services/supabase_service.dart';
 import '../../services/biometric_service.dart';
+import '../../services/subscription_service.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -70,11 +71,12 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => _loading = true);
     try {
       await SupabaseService().signIn(_emailCtrl.text.trim(), _passCtrl.text);
+      await SubscriptionService().markOnboardingComplete();
       // Offer to enable Face ID if not already set
       if (mounted && _biometricAvailable && !_biometricEnabled) {
         _offerBiometricSetup(_emailCtrl.text.trim(), _passCtrl.text);
       } else if (mounted) {
-        context.go('/projects');
+        context.go('/');
       }
     } catch (e) {
       if (mounted) {
@@ -113,7 +115,7 @@ class _LoginScreenState extends State<LoginScreen> {
             onPressed: () async {
               Navigator.pop(context);
               await BiometricService().saveBiometricEnabled(email, password);
-              if (context.mounted) context.go('/projects');
+              if (context.mounted) context.go('/');
             },
             child: const Text('Enable',
                 style: TextStyle(

@@ -6,11 +6,37 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../config/app_theme.dart';
+import '../services/subscription_service.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  int _analysesRemaining = kTrialLimit;
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshTrialBadge();
+  }
+
+  Future<void> _refreshTrialBadge() async {
+    final r = await SubscriptionService().analysesRemaining();
+    if (mounted) setState(() => _analysesRemaining = r);
+  }
+
   Future<void> _pickImage(BuildContext context, ImageSource source) async {
+    // Trial / paywall gate
+    final canRun = await SubscriptionService().canRunAnalysis();
+    if (!canRun && context.mounted) {
+      context.push('/paywall', extra: true);
+      return;
+    }
+
     final picker = ImagePicker();
     final picked = await picker.pickImage(
       source: source,
@@ -24,6 +50,8 @@ class HomeScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final trialExhausted = _analysesRemaining == 0;
+
     return Scaffold(
       backgroundColor: AppColors.background,
       body: SafeArea(
@@ -57,10 +85,55 @@ class HomeScreen extends StatelessWidget {
                       ),
                     ],
                   ),
-                  IconButton(
-                    icon: const Icon(Icons.settings_outlined, color: AppColors.textSecondary),
-                    onPressed: () {},
-                  ),
+                  Row(children: [
+                    // Trial badge / Pro badge
+                    GestureDetector(
+                      onTap: () => context.push('/paywall', extra: false),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                        decoration: BoxDecoration(
+                          color: trialExhausted
+                              ? Colors.red.shade900.withValues(alpha: 0.35)
+                              : AppColors.accentDim,
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: trialExhausted
+                                ? Colors.red.shade700
+                                : AppColors.accent.withValues(alpha: 0.4),
+                          ),
+                        ),
+                        child: Row(mainAxisSize: MainAxisSize.min, children: [
+                          Icon(
+                            trialExhausted
+                                ? Icons.lock_outline
+                                : Icons.auto_awesome,
+                            size: 12,
+                            color: trialExhausted
+                                ? Colors.red.shade400
+                                : AppColors.accent,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            trialExhausted
+                                ? 'Trial ended'
+                                : '$_analysesRemaining left',
+                            style: TextStyle(
+                              color: trialExhausted
+                                  ? Colors.red.shade400
+                                  : AppColors.accent,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ]),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.workspace_premium_outlined,
+                          color: AppColors.textSecondary),
+                      onPressed: () => context.push('/paywall', extra: false),
+                    ),
+                  ]),
                 ],
               ),
             ),

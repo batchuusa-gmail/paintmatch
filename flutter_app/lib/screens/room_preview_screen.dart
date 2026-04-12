@@ -30,6 +30,7 @@ const _surfaces = [
   _Surface('wall',    'Walls',    Icons.format_paint),
   _Surface('ceiling', 'Ceiling',  Icons.roofing),
   _Surface('floor',   'Floor',    Icons.layers),
+  _Surface('trim',    'Trim',     Icons.border_all_outlined),
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────

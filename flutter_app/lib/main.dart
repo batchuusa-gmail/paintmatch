@@ -12,6 +12,9 @@ import 'screens/analysis_loading_screen.dart';
 import 'screens/palette_suggestions_screen.dart';
 import 'screens/room_preview_screen.dart';
 import 'screens/project_board_screen.dart';
+import 'screens/onboarding_screen.dart';
+import 'screens/paywall_screen.dart';
+import 'services/subscription_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -21,25 +24,41 @@ void main() async {
     anonKey: AppConfig.supabaseAnonKey,
   );
 
+  // Start listening for purchase updates immediately
+  SubscriptionService().listenToPurchaseUpdates();
+
   runApp(const PaintMatchApp());
 }
 
 final GoRouter _router = GoRouter(
   initialLocation: '/',
+  // Redirect to onboarding if user hasn't registered yet
+  redirect: (context, state) async {
+    final onboarded = await SubscriptionService().hasCompletedOnboarding();
+    if (!onboarded && state.matchedLocation != '/onboarding') {
+      return '/onboarding';
+    }
+    return null;
+  },
   routes: [
-    GoRoute(path: '/', builder: (_, __) => const HomeScreen()),
-    GoRoute(path: '/loading', builder: (_, state) {
+    GoRoute(path: '/',          builder: (_, __) => const HomeScreen()),
+    GoRoute(path: '/onboarding', builder: (_, __) => const OnboardingScreen()),
+    GoRoute(path: '/paywall',    builder: (_, state) {
+      final trialEnded = (state.extra as bool?) ?? false;
+      return PaywallScreen(trialEnded: trialEnded);
+    }),
+    GoRoute(path: '/loading',    builder: (_, state) {
       final file = state.extra as dynamic;
       return AnalysisLoadingScreen(imageFile: file);
     }),
-    GoRoute(path: '/palette', builder: (_, state) {
+    GoRoute(path: '/palette',    builder: (_, state) {
       final args = state.extra as Map<String, dynamic>;
       return PaletteSuggestionsScreen(
         imageFile: args['imageFile'],
         analysis: args['analysis'],
       );
     }),
-    GoRoute(path: '/preview', builder: (_, state) {
+    GoRoute(path: '/preview',    builder: (_, state) {
       final args = state.extra as Map<String, dynamic>;
       return RoomPreviewScreen(
         originalImageUrl: args['originalImageUrl'],
@@ -50,11 +69,11 @@ final GoRouter _router = GoRouter(
         wallHex: args['wallHex'] as String?,
       );
     }),
-    GoRoute(path: '/projects', builder: (_, __) => const AuthWrapper(
+    GoRoute(path: '/projects',   builder: (_, __) => const AuthWrapper(
       child: ProjectBoardScreen(),
     )),
-    GoRoute(path: '/login', builder: (_, __) => const LoginScreen()),
-    GoRoute(path: '/signup', builder: (_, __) => const SignupScreen()),
+    GoRoute(path: '/login',      builder: (_, __) => const LoginScreen()),
+    GoRoute(path: '/signup',     builder: (_, __) => const SignupScreen()),
   ],
 );
 

@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 
 import '../../config/app_theme.dart';
 import '../../services/supabase_service.dart';
+import '../../services/subscription_service.dart';
 
 class SignupScreen extends StatefulWidget {
   const SignupScreen({super.key});
@@ -37,6 +38,7 @@ class _SignupScreenState extends State<SignupScreen> {
         phone:     _phoneCtrl.text.trim(),
       );
       if (mounted) {
+        await SubscriptionService().markOnboardingComplete();
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Account created! Check your email to confirm.'),
