@@ -10,6 +10,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+import 'package:cached_network_image/cached_network_image.dart';
 import '../config/app_theme.dart';
 import '../models/paint_color.dart';
 import '../services/api_service.dart';
@@ -410,7 +411,25 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   }
 
   Widget _buildOriginalImage() {
-    if (widget.imageFile != null) return Image.file(widget.imageFile!, fit: BoxFit.cover);
+    if (widget.imageFile != null) {
+      return Image.file(widget.imageFile!, fit: BoxFit.cover);
+    }
+    if (widget.originalImageUrl.isNotEmpty) {
+      return CachedNetworkImage(
+        imageUrl: widget.originalImageUrl,
+        fit: BoxFit.cover,
+        placeholder: (_, __) => Container(
+          color: AppColors.card,
+          child: const Center(
+            child: CircularProgressIndicator(color: AppColors.accent, strokeWidth: 2)),
+        ),
+        errorWidget: (_, __, ___) => Container(
+          color: AppColors.card,
+          child: const Icon(Icons.broken_image_outlined,
+              size: 48, color: AppColors.textSecondary),
+        ),
+      );
+    }
     return const SizedBox.shrink();
   }
 
@@ -418,12 +437,28 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
     if (!SupabaseService().isSignedIn) { context.push('/login'); return; }
     setState(() => _saving = true);
     try {
+      // Upload whichever image we have — rendered PNG preferred, fall back to original
+      String? renderedUrl;
+      String? originalUrl;
+
+      if (_renderedBytes != null) {
+        renderedUrl = await SupabaseService().uploadRoomImage(
+          _renderedBytes!, ext: 'png');
+      }
+      if (widget.imageFile != null) {
+        final bytes = await widget.imageFile!.readAsBytes();
+        originalUrl = await SupabaseService().uploadRoomImage(
+          bytes, ext: 'jpg');
+      }
+
       await SupabaseService().saveProject(
-        projectName: _selectedColorName,
-        renderedImageUrl: null,
-        selectedHex: _selectedHex,
+        projectName:      _selectedColorName,
+        roomImageUrl:     originalUrl ?? renderedUrl,
+        renderedImageUrl: renderedUrl ?? originalUrl,
+        selectedHex:      _selectedHex,
       );
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Saved!')));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Project saved!')));
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Save failed: $e'), backgroundColor: AppColors.error));

@@ -156,17 +156,17 @@ class _ProjectBoardScreenState extends State<ProjectBoardScreen> {
                       onRename: () => _renameProject(_projects![i]),
                       onTap: () {
                         final p = _projects![i];
-                        if (p.renderedImageUrl != null) {
-                          context.push('/preview', extra: {
-                            'originalImageUrl': p.roomImageUrl ?? '',
-                            'renderedImageUrl': p.renderedImageUrl,
-                            'selectedHex': p.selectedHex ?? '#FFFFFF',
-                            'selectedColorName': p.projectName,
-                            'imageFile': null,
-                            'wallHex': null,
-                            'finish': 'eggshell',
-                          });
-                        }
+                        final imageUrl = p.renderedImageUrl ?? p.roomImageUrl ?? '';
+                        if (imageUrl.isEmpty) return;
+                        context.push('/preview', extra: {
+                          'originalImageUrl': imageUrl,
+                          'renderedImageUrl': p.renderedImageUrl,
+                          'selectedHex': p.selectedHex ?? '#FFFFFF',
+                          'selectedColorName': p.projectName,
+                          'imageFile': null,
+                          'wallHex': null,
+                          'vendorMatches': null,
+                        });
                       },
                     ),
                   ),

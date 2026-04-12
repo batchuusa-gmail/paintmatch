@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/user_project.dart';
 
@@ -86,6 +87,24 @@ class SupabaseService {
     }).select().single();
 
     return UserProject.fromJson(response);
+  }
+
+  /// Upload image bytes to the `room-images` Supabase Storage bucket.
+  /// Bucket must exist and have public read policy (create once in dashboard).
+  /// Returns the public URL.
+  Future<String> uploadRoomImage(Uint8List bytes, {required String ext}) async {
+    final uid  = currentUser?.id ?? 'anon';
+    final ts   = DateTime.now().millisecondsSinceEpoch;
+    final path = '$uid/room_$ts.$ext';
+    await _sb.storage.from('room-images').uploadBinary(
+      path,
+      bytes,
+      fileOptions: FileOptions(
+        contentType: ext == 'png' ? 'image/png' : 'image/jpeg',
+        upsert: true,
+      ),
+    );
+    return _sb.storage.from('room-images').getPublicUrl(path);
   }
 
   Future<void> deleteProject(String projectId) async {
