@@ -24,6 +24,10 @@ class SupabaseService {
       _sb.auth.signUp(
         email: email,
         password: password,
+        // Deep link the confirmation email back into the app.
+        // Must also be added to Supabase Dashboard → Auth → URL Configuration
+        // → Redirect URLs: paintmatch://auth/callback
+        emailRedirectTo: 'paintmatch://auth/callback',
         data: {
           if (firstName != null) 'first_name': firstName,
           if (lastName != null) 'last_name': lastName,

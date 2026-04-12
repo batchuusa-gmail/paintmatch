@@ -52,6 +52,9 @@ dependencies:
   # In-app purchases (iOS + Android)
   in_app_purchase: ^3.2.0
 
+  # Deep link handling for email confirmation callbacks
+  app_links: ^6.3.2
+
   # Google Fonts
   google_fonts: ^6.2.1
 

@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -77,8 +79,58 @@ final GoRouter _router = GoRouter(
   ],
 );
 
-class PaintMatchApp extends StatelessWidget {
+class PaintMatchApp extends StatefulWidget {
   const PaintMatchApp({super.key});
+
+  @override
+  State<PaintMatchApp> createState() => _PaintMatchAppState();
+}
+
+class _PaintMatchAppState extends State<PaintMatchApp> {
+  StreamSubscription<Uri>? _linkSub;
+
+  @override
+  void initState() {
+    super.initState();
+    _handleDeepLinks();
+  }
+
+  /// Listen for paintmatch://auth/callback deep links.
+  /// Supabase sends the user here after they tap the confirmation email.
+  void _handleDeepLinks() {
+    final appLinks = AppLinks();
+
+    // Handle link that launched the app from cold start
+    appLinks.getInitialLink().then((uri) {
+      if (uri != null) _processAuthLink(uri);
+    });
+
+    // Handle links while app is already running
+    _linkSub = appLinks.uriLinkStream.listen(
+      _processAuthLink,
+      onError: (_) {},
+    );
+  }
+
+  Future<void> _processAuthLink(Uri uri) async {
+    if (uri.scheme != 'paintmatch') return;
+    try {
+      // Let Supabase parse the token from the URL fragment / query params
+      await Supabase.instance.client.auth.getSessionFromUrl(uri);
+      // Session is now active — mark onboarding done and go home
+      await SubscriptionService().markOnboardingComplete();
+      if (mounted) _router.go('/');
+    } catch (_) {
+      // Invalid or expired token — send to login so user can try again
+      if (mounted) _router.go('/login');
+    }
+  }
+
+  @override
+  void dispose() {
+    _linkSub?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
