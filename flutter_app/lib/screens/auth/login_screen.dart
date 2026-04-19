@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../config/app_theme.dart';
+import '../../services/painter_service.dart';
 import '../../services/supabase_service.dart';
 import '../../services/biometric_service.dart';
 import '../../services/subscription_service.dart';
@@ -44,6 +45,15 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  /// Navigate to the right home screen based on role.
+  void _goHome() {
+    if (PainterService().isPainter) {
+      context.go('/painter/dashboard');
+    } else {
+      context.go('/');
+    }
+  }
+
   Future<void> _signInWithBiometrics() async {
     setState(() => _loading = true);
     try {
@@ -53,13 +63,20 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
       await SupabaseService().signIn(creds.email, creds.password);
-      if (mounted) context.go('/projects');
+      if (mounted) _goHome();
     } catch (e) {
+      // Credentials may be stale — disable biometric so user can re-enable
+      // after a successful email/password login.
+      await BiometricService().disable();
       if (mounted) {
-        setState(() => _loading = false);
+        setState(() {
+          _loading = false;
+          _biometricEnabled = false;
+        });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-              content: Text('Biometric sign in failed: $e'),
+              content: const Text(
+                  'Face ID sign in failed. Please sign in with your password.'),
               backgroundColor: AppColors.error),
         );
       }
@@ -76,7 +93,7 @@ class _LoginScreenState extends State<LoginScreen> {
       if (mounted && _biometricAvailable && !_biometricEnabled) {
         _offerBiometricSetup(_emailCtrl.text.trim(), _passCtrl.text);
       } else if (mounted) {
-        context.go('/');
+        _goHome();
       }
     } catch (e) {
       if (mounted) {
@@ -106,7 +123,7 @@ class _LoginScreenState extends State<LoginScreen> {
           TextButton(
             onPressed: () {
               Navigator.pop(context);
-              context.go('/projects');
+              _goHome();
             },
             child: const Text('Not now',
                 style: TextStyle(color: AppColors.textSecondary)),
@@ -115,7 +132,7 @@ class _LoginScreenState extends State<LoginScreen> {
             onPressed: () async {
               Navigator.pop(context);
               await BiometricService().saveBiometricEnabled(email, password);
-              if (context.mounted) context.go('/');
+              if (context.mounted) _goHome();
             },
             child: const Text('Enable',
                 style: TextStyle(

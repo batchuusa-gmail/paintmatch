@@ -16,6 +16,10 @@ import 'screens/room_preview_screen.dart';
 import 'screens/project_board_screen.dart';
 import 'screens/onboarding_screen.dart';
 import 'screens/paywall_screen.dart';
+import 'screens/painter/painter_registration_screen.dart';
+import 'screens/painter/painter_dashboard_screen.dart';
+import 'screens/painter/painter_directory_screen.dart';
+import 'screens/painter/painter_paywall_screen.dart';
 import 'services/subscription_service.dart';
 import 'models/paint_color.dart';
 
@@ -77,7 +81,15 @@ final GoRouter _router = GoRouter(
       child: ProjectBoardScreen(),
     )),
     GoRoute(path: '/login',      builder: (_, __) => const LoginScreen()),
-    GoRoute(path: '/signup',     builder: (_, __) => const SignupScreen()),
+    GoRoute(path: '/signup',     builder: (_, state) {
+      final role = state.uri.queryParameters['role'];
+      return SignupScreen(role: role);
+    }),
+    // Painter role routes
+    GoRoute(path: '/painter/register',  builder: (_, __) => const PainterRegistrationScreen()),
+    GoRoute(path: '/painter/dashboard', builder: (_, __) => const PainterDashboardScreen()),
+    GoRoute(path: '/painter/directory', builder: (_, __) => const PainterDirectoryScreen()),
+    GoRoute(path: '/painter/paywall',   builder: (_, __) => const PainterPaywallScreen()),
   ],
 );
 

@@ -21,6 +21,7 @@ class SupabaseService {
     String? firstName,
     String? lastName,
     String? phone,
+    String? role,
   }) =>
       _sb.auth.signUp(
         email: email,
@@ -33,6 +34,7 @@ class SupabaseService {
           if (firstName != null) 'first_name': firstName,
           if (lastName != null) 'last_name': lastName,
           if (phone != null) 'phone': phone,
+          if (role != null) 'role': role,
         },
       );
 

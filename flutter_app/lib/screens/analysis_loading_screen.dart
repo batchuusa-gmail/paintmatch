@@ -32,6 +32,8 @@ class _AnalysisLoadingScreenState extends State<AnalysisLoadingScreen> {
       await SubscriptionService().recordAnalysis();
 
       setState(() => _status = 'Building color palettes...');
+
+      setState(() => _status = 'Building color palettes...');
       await Future.delayed(const Duration(milliseconds: 600));
 
       if (!mounted) return;

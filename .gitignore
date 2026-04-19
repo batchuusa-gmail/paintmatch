@@ -1,4 +1,5 @@
 # Environment variables — never commit these
+.env
 backend/.env
 flutter_app/.env
 

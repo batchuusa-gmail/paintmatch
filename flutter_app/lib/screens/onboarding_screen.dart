@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../config/app_theme.dart';
+import '../services/painter_service.dart';
 import '../services/subscription_service.dart';
 
 class OnboardingScreen extends StatefulWidget {
@@ -15,6 +16,8 @@ class OnboardingScreen extends StatefulWidget {
 class _OnboardingScreenState extends State<OnboardingScreen> {
   final _pageController = PageController();
   int _page = 0;
+  // null = not chosen yet, 'homeowner' or 'painter'
+  String? _selectedRole;
 
   static const _pages = [
     _OnboardingPage(
@@ -49,6 +52,11 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   Future<void> _goAuth(String route) async {
     await SubscriptionService().markOnboardingComplete();
     if (mounted) context.go(route);
+  }
+
+  Future<void> _goAsPainter() async {
+    await SubscriptionService().markOnboardingComplete();
+    if (mounted) context.go('/signup?role=painter');
   }
 
   @override
@@ -114,8 +122,35 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 24),
               child: isLast
                   ? Column(children: [
+                      // Role selector
+                      const Text('I am a…',
+                          style: TextStyle(
+                              color: AppColors.textSecondary, fontSize: 13)),
+                      const SizedBox(height: 10),
+                      Row(children: [
+                        Expanded(child: _RoleChip(
+                          label: 'Homeowner',
+                          icon: Icons.home_outlined,
+                          selected: _selectedRole == PainterService.roleHomeowner,
+                          onTap: () => setState(
+                              () => _selectedRole = PainterService.roleHomeowner),
+                        )),
+                        const SizedBox(width: 10),
+                        Expanded(child: _RoleChip(
+                          label: 'Painter',
+                          icon: Icons.format_paint_outlined,
+                          selected: _selectedRole == PainterService.rolePainter,
+                          onTap: () => setState(
+                              () => _selectedRole = PainterService.rolePainter),
+                        )),
+                      ]),
+                      const SizedBox(height: 16),
                       FilledButton(
-                        onPressed: () => _goAuth('/signup'),
+                        onPressed: _selectedRole == null
+                            ? null
+                            : () => _selectedRole == PainterService.rolePainter
+                                ? _goAsPainter()
+                                : _goAuth('/signup'),
                         style: FilledButton.styleFrom(
                           minimumSize: const Size.fromHeight(54),
                           shape: RoundedRectangleBorder(
@@ -142,7 +177,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                       ),
                       const SizedBox(height: 16),
                       Text(
-                        'Free trial includes ${kTrialLimit} room analyses.\nNo credit card required.',
+                        'Free trial includes $kTrialLimit room analyses.\nNo credit card required.',
                         textAlign: TextAlign.center,
                         style: const TextStyle(
                             color: AppColors.textSecondary, fontSize: 12),
@@ -165,6 +200,52 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
             const SizedBox(height: 32),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// ─── Role chip ────────────────────────────────────────────────────────────────
+
+class _RoleChip extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+  const _RoleChip({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        decoration: BoxDecoration(
+          color: selected ? AppColors.accentDim : AppColors.card,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+              color: selected ? AppColors.accent : AppColors.border,
+              width: selected ? 1.5 : 1),
+        ),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon,
+              color: selected ? AppColors.accent : AppColors.textSecondary,
+              size: 22),
+          const SizedBox(height: 6),
+          Text(label,
+              style: TextStyle(
+                  color: selected
+                      ? AppColors.accent
+                      : AppColors.textSecondary,
+                  fontSize: 13,
+                  fontWeight: selected ? FontWeight.w700 : FontWeight.normal)),
+        ]),
       ),
     );
   }

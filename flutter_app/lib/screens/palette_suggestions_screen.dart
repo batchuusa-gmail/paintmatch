@@ -6,9 +6,11 @@ import 'package:google_fonts/google_fonts.dart';
 import '../config/app_theme.dart';
 import '../models/room_analysis.dart';
 import '../models/paint_color.dart';
+import '../models/room_dimensions.dart';
 import '../services/api_service.dart';
 import '../widgets/vendor_comparison_card.dart';
 import '../widgets/cost_estimate_sheet.dart';
+import '../widgets/paint_calculator_card.dart';
 import '../utils/color_ext.dart';
 
 class PaletteSuggestionsScreen extends StatefulWidget {
@@ -29,11 +31,14 @@ class _PaletteSuggestionsScreenState extends State<PaletteSuggestionsScreen> {
   int _selectedIndex = 0;
   List<PaintColor>? _vendorMatches;
   bool _loadingVendors = false;
+  DimensionEstimate? _dimensionEstimate;
 
   @override
   void initState() {
     super.initState();
+    // Load vendor matches and dimension estimate in parallel
     _loadVendorMatches();
+    _loadDimensionEstimate();
   }
 
   Future<void> _loadVendorMatches() async {
@@ -49,12 +54,34 @@ class _PaletteSuggestionsScreenState extends State<PaletteSuggestionsScreen> {
     }
   }
 
+  Future<void> _loadDimensionEstimate() async {
+    try {
+      final estimate = await ApiService().estimateDimensions(widget.imageFile);
+      if (mounted) setState(() => _dimensionEstimate = estimate);
+    } catch (_) {
+      if (mounted) setState(() => _dimensionEstimate = DimensionEstimate.fallback);
+    }
+  }
+
   void _selectPalette(int index) {
     setState(() { _selectedIndex = index; _vendorMatches = null; });
     _loadVendorMatches();
   }
 
   PaletteSuggestion get _selected => widget.analysis.recommendedPalettes[_selectedIndex];
+
+  /// Auto-build RoomDimensions from AI estimate — defaults: 9ft ceiling, 1 door, 1 window
+  RoomDimensions? get _autoDimensions {
+    final e = _dimensionEstimate;
+    if (e == null) return null;
+    return RoomDimensions(
+      ceilingHeightFt: 9.0,
+      wallWidthFt: e.estimatedWallWidthFt,
+      roomDepthFt: e.estimatedRoomDepthFt,
+      doorCount: 1,
+      windowCount: 1,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -203,6 +230,49 @@ class _PaletteSuggestionsScreenState extends State<PaletteSuggestionsScreen> {
                 ),
               ),
             ),
+            const SizedBox(height: 12),
+
+            const SizedBox(height: 12),
+
+            // ── Paint Calculator (auto-shown once AI estimate loads) ─────────
+            if (_dimensionEstimate == null)
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 20),
+                child: Row(children: [
+                  SizedBox(
+                    width: 14, height: 14,
+                    child: CircularProgressIndicator(
+                        color: AppColors.accent, strokeWidth: 2),
+                  ),
+                  SizedBox(width: 10),
+                  Text('Estimating room dimensions…',
+                      style: TextStyle(
+                          color: AppColors.textSecondary, fontSize: 12)),
+                ]),
+              )
+            else ...[
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: Row(children: [
+                  const Icon(Icons.check_circle,
+                      color: AppColors.accent, size: 14),
+                  const SizedBox(width: 6),
+                  Text(
+                    _dimensionEstimate!.confidence == 'low'
+                        ? 'AI estimated room (~${_dimensionEstimate!.estimatedWallWidthFt.toStringAsFixed(0)}×${_dimensionEstimate!.estimatedRoomDepthFt.toStringAsFixed(0)} ft)'
+                        : 'Detected ${_dimensionEstimate!.referenceObject} — ${_dimensionEstimate!.estimatedWallWidthFt.toStringAsFixed(0)}×${_dimensionEstimate!.estimatedRoomDepthFt.toStringAsFixed(0)} ft',
+                    style: const TextStyle(
+                        color: AppColors.textSecondary, fontSize: 12),
+                  ),
+                ]),
+              ),
+              const SizedBox(height: 12),
+              PaintCalculatorCard(
+                dimensions: _autoDimensions!,
+                vendors: _vendorMatches ?? [],
+              ),
+            ],
+
             const SizedBox(height: 12),
 
             // ── Preview CTA ─────────────────────────────────────────────────

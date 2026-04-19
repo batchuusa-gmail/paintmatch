@@ -123,9 +123,11 @@ class _BfsParams {
   final Uint8List srcRgba;
   final int srcW, srcH;
   final int seedX, seedY;
+  final bool trimMode; // tight tolerance for thin trim strips
   const _BfsParams({
     required this.srcRgba, required this.srcW, required this.srcH,
     required this.seedX,   required this.seedY,
+    this.trimMode = false,
   });
 }
 
@@ -160,8 +162,11 @@ Uint8List _bfsIsolate(_BfsParams p) {
     }
   }
   variance /= (count * 3);  // avg per-channel squared deviation
-  // tolerance range 22–58: tight for flat painted walls, loose for textured
-  final tolerance = (22.0 + math.sqrt(variance)).clamp(22.0, 58.0);
+  // trim mode: very tight (8–15) to stay within narrow baseboards/door frames
+  // normal: adaptive 22–58 based on local texture variance
+  final double maxTol = p.trimMode ? 15.0 : 58.0;
+  final double minTol = p.trimMode ? 8.0 : 22.0;
+  final tolerance = (minTol + math.sqrt(variance)).clamp(minTol, maxTol);
   final tolSq     = tolerance * tolerance * 3;  // squared, 3 channels
 
   // ── 3. BFS with a pre-allocated Int32List ring buffer ────────────────────
@@ -250,12 +255,23 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   Uint8List? _cachedMaskRgba;
   int? _cachedMaskW, _cachedMaskH;
 
+  // ── Precision auto-segmentation ───────────────────────────────────────────
+  // Pre-computed SAM masks for every surface, loaded once on init.
+  // Keys: 'wall', 'ceiling', 'floor', 'trim'
+  final Map<String, Uint8List> _surfaceMasks = {};
+  final Map<String, int> _surfaceMaskW = {};
+  final Map<String, int> _surfaceMaskH = {};
+  bool _segmenting = false;   // true while backend is running
+  bool _segmentFailed = false;
+
   @override
   void initState() {
     super.initState();
     _selectedHex = widget.selectedHex;
     _selectedColorName = widget.selectedColorName;
     _loadImage();
+    // Auto-segment all surfaces as soon as screen opens (parallel with image load)
+    if (widget.imageFile != null) _autoSegmentRoom();
   }
 
   Future<void> _loadImage() async {
@@ -272,6 +288,77 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       _srcRgba = bd!.buffer.asUint8List();
     } catch (e) {
       if (mounted) setState(() { _renderStatus = 'Failed to load: $e'; });
+    } finally {
+      if (mounted) setState(() => _rendering = false);
+      // If segments already arrived before image finished loading, paint now
+      _autoPaintIfReady();
+    }
+  }
+
+  // ── Auto-segmentation ─────────────────────────────────────────────────────
+
+  Future<void> _autoSegmentRoom() async {
+    if (mounted) setState(() { _segmenting = true; _segmentFailed = false; });
+    try {
+      final masks = await ApiService().segmentRoom(widget.imageFile!);
+      for (final entry in masks.entries) {
+        try {
+          final pngBytes = base64Decode(entry.value);
+          final codec = await ui.instantiateImageCodec(pngBytes);
+          final frame = await codec.getNextFrame();
+          final maskImg = frame.image;
+          final bd = await maskImg.toByteData(format: ui.ImageByteFormat.rawRgba);
+          if (bd != null && mounted) {
+            _surfaceMasks[entry.key] = bd.buffer.asUint8List();
+            _surfaceMaskW[entry.key] = maskImg.width;
+            _surfaceMaskH[entry.key] = maskImg.height;
+          }
+        } catch (_) {}
+      }
+      if (mounted) setState(() => _segmenting = false);
+      _autoPaintIfReady();
+    } catch (e) {
+      debugPrint('[AutoSegment] $e');
+      if (mounted) setState(() { _segmenting = false; _segmentFailed = true; });
+    }
+  }
+
+  /// Paint immediately when both image data and surface mask are ready.
+  void _autoPaintIfReady() {
+    if (_rendering || _renderedBytes != null) return; // already busy or done
+    if (_srcRgba == null || _srcImage == null) return;
+    if (_surfaceMasks.containsKey(_selectedSurface)) {
+      _applyPrecomputedMask(_selectedSurface);
+    }
+  }
+
+  /// Apply a pre-computed surface mask with the current selected color.
+  Future<void> _applyPrecomputedMask(String surface) async {
+    final maskRgba = _surfaceMasks[surface];
+    final maskW = _surfaceMaskW[surface];
+    final maskH = _surfaceMaskH[surface];
+    if (maskRgba == null || maskW == null || maskH == null) return;
+    if (_srcImage == null || _srcRgba == null) return;
+    if (_rendering) return;
+
+    setState(() { _rendering = true; _renderStatus = 'Painting $surface…'; });
+    try {
+      final target = HexColor.fromHex(_selectedHex);
+      final out = await compute(_blendIsolate, _BlendParams(
+        srcRgba: _srcRgba!, srcW: _srcImage!.width, srcH: _srcImage!.height,
+        maskRgba: maskRgba, maskW: maskW, maskH: maskH,
+        tR: (target.r * 255).round(),
+        tG: (target.g * 255).round(),
+        tB: (target.b * 255).round(),
+      ));
+      final c = Completer<ui.Image>();
+      ui.decodeImageFromPixels(
+          out, _srcImage!.width, _srcImage!.height, ui.PixelFormat.rgba8888, c.complete);
+      final rendered = await c.future;
+      final renderBd = await rendered.toByteData(format: ui.ImageByteFormat.png);
+      if (mounted) setState(() { _renderedBytes = renderBd!.buffer.asUint8List(); _renderStatus = ''; });
+    } catch (e, s) {
+      debugPrint('[ApplyMask] $e\n$s');
     } finally {
       if (mounted) setState(() => _rendering = false);
     }
@@ -334,6 +421,7 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
           final maskRgba = await compute(_bfsIsolate, _BfsParams(
             srcRgba: _srcRgba!, srcW: imgW, srcH: imgH,
             seedX: sx, seedY: sy,
+            trimMode: _selectedSurface == 'trim',
           ));
           _cachedMaskRgba = maskRgba;
           _cachedMaskW    = imgW;
@@ -403,8 +491,12 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       setState(() {
         _selectedHex = result['hex']!;
         _selectedColorName = result['name']!;
+        _renderedBytes = null;
       });
-      if (_seedX != null) {
+      // Use precomputed mask if available, otherwise re-tap seed
+      if (_surfaceMasks.containsKey(_selectedSurface)) {
+        _applyPrecomputedMask(_selectedSurface);
+      } else if (_seedX != null) {
         _paint(); // re-paint with same seed, new color
       }
     }
@@ -544,6 +636,9 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                             ),
                           )),
                       ])
+                    // ── Saved image view (no imageFile = no tap-to-paint) ──
+                    : widget.imageFile == null
+                        ? _buildOriginalImage()
                     // ── Tap-to-paint mode ──
                     : LayoutBuilder(builder: (ctx, box) => GestureDetector(
                         onTapUp: (d) => _onImageTap(d, box),
@@ -662,8 +757,54 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                       style: TextStyle(color: AppColors.textSecondary, fontSize: 11,
                           fontWeight: FontWeight.w600, letterSpacing: 0.8)),
                   const SizedBox(height: 10),
+                  // Segmentation status banner
+                  if (_segmenting)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: Row(children: [
+                        const SizedBox(
+                          width: 12, height: 12,
+                          child: CircularProgressIndicator(
+                              color: AppColors.accent, strokeWidth: 2),
+                        ),
+                        const SizedBox(width: 8),
+                        const Text('Mapping surfaces with AI…',
+                            style: TextStyle(
+                                color: AppColors.textSecondary, fontSize: 12)),
+                      ]),
+                    )
+                  else if (_surfaceMasks.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: Row(children: [
+                        const Icon(Icons.check_circle,
+                            color: AppColors.accent, size: 13),
+                        const SizedBox(width: 6),
+                        Text(
+                          '${_surfaceMasks.length} surfaces mapped — tap chip to paint',
+                          style: const TextStyle(
+                              color: AppColors.accent,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600),
+                        ),
+                      ]),
+                    )
+                  else if (_segmentFailed)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: Row(children: [
+                        const Icon(Icons.touch_app,
+                            color: AppColors.textSecondary, size: 13),
+                        const SizedBox(width: 6),
+                        const Text('Tap the surface to paint it',
+                            style: TextStyle(
+                                color: AppColors.textSecondary, fontSize: 11)),
+                      ]),
+                    ),
+
                   Row(children: _surfaces.map((s) {
                     final sel = _selectedSurface == s.id;
+                    final hasMask = _surfaceMasks.containsKey(s.id);
                     return Padding(
                       padding: const EdgeInsets.only(right: 10),
                       child: GestureDetector(
@@ -675,6 +816,10 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                             _seedY = null;
                             _cachedMaskRgba = null;
                           });
+                          // Instant paint when pre-computed mask available
+                          if (hasMask) {
+                            _applyPrecomputedMask(s.id);
+                          }
                         },
                         child: AnimatedContainer(
                           duration: const Duration(milliseconds: 150),
@@ -683,12 +828,32 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                             color: sel ? AppColors.accentDim : AppColors.card,
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(
-                              color: sel ? AppColors.accent : AppColors.border,
+                              color: sel
+                                  ? AppColors.accent
+                                  : hasMask
+                                      ? AppColors.accent.withValues(alpha: 0.4)
+                                      : AppColors.border,
                               width: sel ? 1.5 : 1),
                           ),
                           child: Column(children: [
-                            Icon(s.icon, size: 20,
-                                color: sel ? AppColors.accent : AppColors.textSecondary),
+                            Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                Icon(s.icon, size: 20,
+                                    color: sel ? AppColors.accent : AppColors.textSecondary),
+                                if (hasMask && !sel)
+                                  Positioned(
+                                    top: -4, right: -6,
+                                    child: Container(
+                                      width: 8, height: 8,
+                                      decoration: const BoxDecoration(
+                                        color: AppColors.accent,
+                                        shape: BoxShape.circle,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
                             const SizedBox(height: 4),
                             Text(s.label,
                                 style: TextStyle(

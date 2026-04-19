@@ -3,11 +3,13 @@ import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../config/app_theme.dart';
+import '../../services/painter_service.dart';
 import '../../services/supabase_service.dart';
 import '../../services/subscription_service.dart';
 
 class SignupScreen extends StatefulWidget {
-  const SignupScreen({super.key});
+  final String? role;
+  const SignupScreen({super.key, this.role});
 
   @override
   State<SignupScreen> createState() => _SignupScreenState();
@@ -29,22 +31,37 @@ class _SignupScreenState extends State<SignupScreen> {
     setState(() => _loading = true);
     final email    = _emailCtrl.text.trim();
     final password = _passCtrl.text;
+    final isPainter = widget.role == PainterService.rolePainter;
     try {
-      await SupabaseService().signUp(
+      final authResp = await SupabaseService().signUp(
         email,
         password,
         firstName: _firstCtrl.text.trim(),
         lastName:  _lastCtrl.text.trim(),
         phone:     _phoneCtrl.text.trim(),
+        role:      widget.role,
       );
+      // If signup didn't return a session (email confirmation required),
+      // attempt sign-in so painters have an active session before creating
+      // their profile (needed for RLS). Requires "Confirm email" OFF in
+      // Supabase Dashboard → Auth → Providers → Email.
+      if (isPainter && authResp.session == null) {
+        await SupabaseService().signIn(email, password);
+      }
       if (mounted) {
         await SubscriptionService().markOnboardingComplete();
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Account created! Check your email to confirm.'),
+          SnackBar(
+            content: Text(isPainter
+                ? 'Account created! Complete your painter profile.'
+                : 'Account created! Check your email to confirm.'),
           ),
         );
-        context.go('/login');
+        if (isPainter) {
+          context.go('/painter/register');
+        } else {
+          context.go('/login');
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -96,9 +113,12 @@ class _SignupScreenState extends State<SignupScreen> {
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios,
               color: AppColors.textPrimary, size: 18),
-          onPressed: () => context.pop(),
+          onPressed: () => context.canPop() ? context.pop() : context.go('/'),
         ),
-        title: Text('Create Account',
+        title: Text(
+            widget.role == PainterService.rolePainter
+                ? 'Painter Sign Up'
+                : 'Create Account',
             style: GoogleFonts.playfairDisplay(
                 color: AppColors.textPrimary, fontWeight: FontWeight.w600)),
       ),
@@ -125,14 +145,20 @@ class _SignupScreenState extends State<SignupScreen> {
                 ),
                 const SizedBox(height: 20),
 
-                Text('Create account',
+                Text(
+                    widget.role == PainterService.rolePainter
+                        ? 'Join as a Painter'
+                        : 'Create account',
                     style: GoogleFonts.playfairDisplay(
                         color: AppColors.textPrimary,
                         fontSize: 26,
                         fontWeight: FontWeight.w600)),
                 const SizedBox(height: 6),
-                const Text('Save your rooms and track your projects',
-                    style: TextStyle(
+                Text(
+                    widget.role == PainterService.rolePainter
+                        ? 'Create your account to set up your painter profile'
+                        : 'Save your rooms and track your projects',
+                    style: const TextStyle(
                         color: AppColors.textSecondary, fontSize: 14)),
                 const SizedBox(height: 28),
 

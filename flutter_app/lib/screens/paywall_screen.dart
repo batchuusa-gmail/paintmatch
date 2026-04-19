@@ -220,6 +220,21 @@ class _PaywallScreenState extends State<PaywallScreen> {
                     fontSize: 10,
                     height: 1.5),
               ),
+
+              const SizedBox(height: 20),
+              // ── Dev / testing bypass ──────────────────────────────────────
+              OutlinedButton(
+                onPressed: () async {
+                  await SubscriptionService().grantPro(plan: 'pro_test');
+                  if (context.mounted) context.go('/');
+                },
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(44),
+                  side: const BorderSide(color: AppColors.border),
+                ),
+                child: const Text('Skip for now (Testing)',
+                    style: TextStyle(color: AppColors.textSecondary, fontSize: 13)),
+              ),
             ],
           ),
         ),
