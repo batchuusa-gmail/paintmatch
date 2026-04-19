@@ -141,20 +141,26 @@ class _CostEstimateSheetState extends State<CostEstimateSheet> {
                 children: [
 
                   // ── Wall breakdown ───────────────────────────────────────
-                  _SectionLabel('Walls Detected'),
+                  Row(children: [
+                    const Expanded(child: _SectionLabel('Walls Detected')),
+                    if (_est.hasEstimatedDimensions)
+                      const _EstimatedBadge(),
+                  ]),
                   const SizedBox(height: 8),
                   ..._est.walls.map((w) => _DimRow(
-                        label: w.label,
-                        detail: '${w.widthFt.toStringAsFixed(1)}ft × ${w.heightFt.toStringAsFixed(1)}ft',
+                        label: 'Wall ${w.id}  •  ${w.label}',
+                        detail: '${w.widthFt.toStringAsFixed(1)} ft × ${w.heightFt.toStringAsFixed(1)} ft',
                         value: '${w.areaSqft.toStringAsFixed(0)} sq ft',
+                        estimated: w.estimated,
                       )),
                   if (_est.openings.isNotEmpty) ...[
                     const SizedBox(height: 4),
                     ..._est.openings.map((o) => _DimRow(
-                          label: '− ${o.label}',
-                          detail: '${o.widthFt.toStringAsFixed(1)}ft × ${o.heightFt.toStringAsFixed(1)}ft',
+                          label: '− ${o.type[0].toUpperCase()}${o.type.substring(1)} ${o.id}  (Wall ${o.wallId})',
+                          detail: '${o.widthFt.toStringAsFixed(1)} ft × ${o.heightFt.toStringAsFixed(1)} ft',
                           value: '−${o.areaSqft.toStringAsFixed(0)} sq ft',
                           isDeduction: true,
+                          estimated: o.estimated,
                         )),
                   ],
                   const SizedBox(height: 8),
@@ -179,10 +185,11 @@ class _CostEstimateSheetState extends State<CostEstimateSheet> {
                     ]),
                     const SizedBox(height: 8),
                     ..._est.trim.map((t) => _DimRow(
-                          label: t.label,
+                          label: t.displayLabel,
                           detail: '${t.lengthFt.toStringAsFixed(1)} lin ft × ${t.widthIn.toStringAsFixed(1)}"',
                           value: '${t.areaSqft.toStringAsFixed(1)} sq ft',
                           dimmed: !_includeTrim,
+                          estimated: t.estimated,
                         )),
                     const SizedBox(height: 8),
                     _AreaSummaryRow(
@@ -209,7 +216,7 @@ class _CostEstimateSheetState extends State<CostEstimateSheet> {
                   const SizedBox(height: 20),
 
                   // ── Notes from AI ─────────────────────────────────────────
-                  if (_est.notes.isNotEmpty) ...[
+                  if (_est.notes.isNotEmpty || _est.referenceUsed.isNotEmpty) ...[
                     Container(
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
@@ -224,11 +231,25 @@ class _CostEstimateSheetState extends State<CostEstimateSheet> {
                               color: AppColors.textSecondary, size: 14),
                           const SizedBox(width: 8),
                           Expanded(
-                            child: Text(_est.notes,
-                                style: const TextStyle(
-                                    color: AppColors.textSecondary,
-                                    fontSize: 11,
-                                    height: 1.5)),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                if (_est.referenceUsed.isNotEmpty)
+                                  Text('Reference: ${_est.referenceUsed}',
+                                      style: TextStyle(
+                                          color: AppColors.accent.withValues(alpha: 0.8),
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w600)),
+                                if (_est.referenceUsed.isNotEmpty && _est.notes.isNotEmpty)
+                                  const SizedBox(height: 4),
+                                if (_est.notes.isNotEmpty)
+                                  Text(_est.notes,
+                                      style: const TextStyle(
+                                          color: AppColors.textSecondary,
+                                          fontSize: 11,
+                                          height: 1.5)),
+                              ],
+                            ),
                           ),
                         ],
                       ),
@@ -345,6 +366,7 @@ class _DimRow extends StatelessWidget {
   final String value;
   final bool isDeduction;
   final bool dimmed;
+  final bool estimated;
 
   const _DimRow({
     required this.label,
@@ -352,6 +374,7 @@ class _DimRow extends StatelessWidget {
     required this.value,
     this.isDeduction = false,
     this.dimmed = false,
+    this.estimated = false,
   });
 
   @override
@@ -366,9 +389,21 @@ class _DimRow extends StatelessWidget {
       child: Row(children: [
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(label,
-                style: TextStyle(
-                    color: textColor, fontSize: 12, fontWeight: FontWeight.w500)),
+            Row(children: [
+              Flexible(
+                child: Text(label,
+                    style: TextStyle(
+                        color: textColor, fontSize: 12, fontWeight: FontWeight.w500)),
+              ),
+              if (estimated) ...[
+                const SizedBox(width: 4),
+                Text('est.',
+                    style: TextStyle(
+                        color: Colors.orange.shade400,
+                        fontSize: 9,
+                        fontWeight: FontWeight.w600)),
+              ],
+            ]),
             Text(detail,
                 style: TextStyle(
                     color: AppColors.textSecondary.withValues(alpha: dimmed ? 0.3 : 0.7),
@@ -383,6 +418,22 @@ class _DimRow extends StatelessWidget {
       ]),
     );
   }
+}
+
+class _EstimatedBadge extends StatelessWidget {
+  const _EstimatedBadge();
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          color: Colors.orange.shade900.withValues(alpha: 0.2),
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: Colors.orange.shade700.withValues(alpha: 0.5)),
+        ),
+        child: Text('Some dims estimated',
+            style: TextStyle(
+                color: Colors.orange.shade400, fontSize: 9, fontWeight: FontWeight.w600)),
+      );
 }
 
 // ─── Area summary row ─────────────────────────────────────────────────────────

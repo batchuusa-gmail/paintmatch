@@ -33,69 +33,104 @@ def _get_client() -> anthropic.Anthropic:
 
 SYSTEM_PROMPT = """You are a professional paint estimator analyzing a room photo.
 
-Detect every paintable surface and return structured measurements so a paint calculator
-can compute gallons needed — separately for walls and trim.
+Detect every paintable surface. Return structured JSON that a paint calculator will use
+to compute gallons for walls and trim separately.
 
 MEASUREMENT RULES:
-- Use any known reference object to calibrate scale: interior door (80"H × 32"W typical),
-  standard outlet/switch plate (4.5"H × 2.75"W), window (varies), kitchen counter (36"H).
-- Estimate each WALL separately — do not use total room square footage.
-- TRIM is always measured as linear length × trim width, NOT area.
-- OPENINGS (doors + windows) must be listed so they can be subtracted from wall area.
-- If a dimension is unclear, estimate it and flag in "notes".
+- Calibrate scale using reference objects: interior door = 80"H × 32"W, outlet plate = 4.5"H × 2.75"W,
+  window sill = 36" above floor, kitchen counter = 36"H, standard ceiling = 8-9 ft.
+- Label each wall A, B, C, D (visible ones only).
+- Each wall is measured separately — never use total room square footage.
+- Trim is measured as linear feet × width, NOT area.
+- If the room is irregular, split walls into rectangles.
+- Mark "estimated": true for any dimension you cannot measure precisely.
+- Associate each opening with the wall it belongs to (wall_id field).
 
-CALCULATION TO APPLY AFTER THIS PROMPT (do NOT compute — just provide the measurements):
-  paintable_wall_sqft = sum(wall.width × wall.height) − sum(opening.width × opening.height)
-  trim_sqft = sum(trim.length_ft × trim.width_in / 12)
+TRIM TYPES to detect separately if visible:
+  baseboards, crown_molding, door_casings, window_casings
 
-Return ONLY valid JSON — no markdown, no extra text:
+Return ONLY valid JSON:
 {
   "walls": [
-    {"label": "wall 1", "width_ft": 14.0, "height_ft": 9.0},
-    {"label": "wall 2", "width_ft": 12.0, "height_ft": 9.0}
+    {"id": "A", "label": "north wall", "width_ft": 14.0, "height_ft": 9.0, "estimated": false},
+    {"id": "B", "label": "east wall",  "width_ft": 12.0, "height_ft": 9.0, "estimated": false}
   ],
-  "trim": [
-    {"label": "baseboards", "length_ft": 52.0, "width_in": 3.5},
-    {"label": "door casings", "length_ft": 14.0, "width_in": 2.5},
-    {"label": "window casings", "length_ft": 8.0, "width_in": 2.5}
-  ],
+  "trim": {
+    "baseboards":     {"length_ft": 48.0, "width_in": 3.5,  "estimated": false},
+    "crown_molding":  {"length_ft": 0.0,  "width_in": 4.0,  "estimated": true},
+    "door_casings":   {"length_ft": 14.0, "width_in": 2.5,  "estimated": true},
+    "window_casings": {"length_ft": 8.0,  "width_in": 2.5,  "estimated": true}
+  },
   "openings": [
-    {"label": "door", "width_ft": 3.0, "height_ft": 6.8},
-    {"label": "window", "width_ft": 3.5, "height_ft": 4.0}
+    {"id": "D1", "type": "door",   "wall_id": "A", "width_ft": 3.0, "height_ft": 6.8, "estimated": false},
+    {"id": "W1", "type": "window", "wall_id": "B", "width_ft": 3.5, "height_ft": 4.0, "estimated": true}
   ],
   "ceiling_height_ft": 9.0,
   "confidence": "medium",
-  "notes": "Calibrated from interior door. Trim widths estimated at standard sizes."
+  "reference_used": "interior door on Wall A",
+  "notes": "Crown molding not visible. Window dims estimated from proportion."
 }
 
 Rules:
-- Include all walls visible — even partial ones.
-- Baseboards run the full room perimeter minus door openings.
-- Crown molding (if visible) is separate trim entry.
-- Door and window casings are separate trim entries.
-- If ceiling will be painted, add it as a wall entry with label "ceiling".
-- If a surface is not visible or not applicable, omit it from the list.
-- confidence = "high" if a clear reference object was found, "medium" if estimated from
-  proportions, "low" if very uncertain."""
+- Omit trim types that are not visible (set length_ft: 0.0 and estimated: true if unsure).
+- wall_id in openings must match a wall id in the walls array.
+- confidence: "high" = reference object found, "medium" = proportion estimate, "low" = very uncertain."""
+
+
+def _compute_totals(data: dict) -> dict:
+    """Compute totals object from parsed Claude output."""
+    wall_area = sum(w.get("width_ft", 0) * w.get("height_ft", 0) for w in data.get("walls", []))
+    openings_area = sum(o.get("width_ft", 0) * o.get("height_ft", 0) for o in data.get("openings", []))
+    net_wall = max(0.0, wall_area - openings_area)
+
+    trim = data.get("trim", {})
+    trim_area = 0.0
+    for t in trim.values():
+        length = t.get("length_ft", 0)
+        width_in = t.get("width_in", 0)
+        trim_area += length * (width_in / 12.0)
+
+    coverage = 400.0
+    return {
+        "wall_area_sqft": round(wall_area, 1),
+        "openings_area_sqft": round(openings_area, 1),
+        "net_wall_area_sqft": round(net_wall, 1),
+        "trim_area_sqft": round(trim_area, 2),
+        "paint_estimate": {
+            "coverage_sqft_per_gallon": coverage,
+            "wall_paint": {
+                "1_coat_gallons": round(net_wall / coverage, 2),
+                "2_coats_gallons": round(net_wall * 2 / coverage, 2),
+            },
+            "trim_paint": {
+                "1_coat_gallons": round(trim_area / coverage, 2),
+                "2_coats_gallons": round(trim_area * 2 / coverage, 2),
+            },
+        },
+    }
+
 
 _FALLBACK = {
     "walls": [
-        {"label": "wall 1", "width_ft": 14.0, "height_ft": 9.0},
-        {"label": "wall 2", "width_ft": 14.0, "height_ft": 9.0},
-        {"label": "wall 3", "width_ft": 12.0, "height_ft": 9.0},
-        {"label": "wall 4", "width_ft": 12.0, "height_ft": 9.0},
+        {"id": "A", "label": "wall A", "width_ft": 14.0, "height_ft": 9.0, "estimated": True},
+        {"id": "B", "label": "wall B", "width_ft": 14.0, "height_ft": 9.0, "estimated": True},
+        {"id": "C", "label": "wall C", "width_ft": 12.0, "height_ft": 9.0, "estimated": True},
+        {"id": "D", "label": "wall D", "width_ft": 12.0, "height_ft": 9.0, "estimated": True},
     ],
-    "trim": [
-        {"label": "baseboards", "length_ft": 52.0, "width_in": 3.5},
-        {"label": "door casings", "length_ft": 14.0, "width_in": 2.5},
-    ],
+    "trim": {
+        "baseboards":     {"length_ft": 52.0, "width_in": 3.5, "estimated": True},
+        "crown_molding":  {"length_ft": 0.0,  "width_in": 4.0, "estimated": True},
+        "door_casings":   {"length_ft": 14.0, "width_in": 2.5, "estimated": True},
+        "window_casings": {"length_ft": 8.0,  "width_in": 2.5, "estimated": True},
+    },
     "openings": [
-        {"label": "door", "width_ft": 3.0, "height_ft": 6.8},
-        {"label": "window", "width_ft": 3.5, "height_ft": 4.0},
+        {"id": "D1", "type": "door",   "wall_id": "A", "width_ft": 3.0, "height_ft": 6.8, "estimated": True},
+        {"id": "W1", "type": "window", "wall_id": "B", "width_ft": 3.5, "height_ft": 4.0, "estimated": True},
     ],
     "ceiling_height_ft": 9.0,
     "confidence": "low",
-    "notes": "Default estimate — no image provided",
+    "reference_used": "none",
+    "notes": "Default estimate — image not analyzed",
 }
 
 
@@ -145,11 +180,15 @@ def estimate_dimensions():
 
         # Ensure required keys exist
         result.setdefault("walls", _FALLBACK["walls"])
-        result.setdefault("trim", [])
+        result.setdefault("trim", {})
         result.setdefault("openings", [])
         result.setdefault("ceiling_height_ft", 9.0)
         result.setdefault("confidence", "medium")
+        result.setdefault("reference_used", "")
         result.setdefault("notes", "")
+
+        # Compute totals server-side
+        result["totals"] = _compute_totals(result)
 
         return jsonify({"data": result})
 
