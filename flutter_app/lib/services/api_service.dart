@@ -169,7 +169,7 @@ class ApiService {
       uri,
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({'image_b64': b64}),
-    ).timeout(const Duration(seconds: 90));
+    ).timeout(const Duration(seconds: 120));
 
     final json = jsonDecode(response.body) as Map<String, dynamic>;
     if (json['error'] != null) throw Exception(json['error']);
