@@ -37,18 +37,25 @@ def _get_client() -> anthropic.Anthropic:
     return _anthropic_client
 
 
-SEED_PROMPT = """You are analyzing a room photo to identify paintable surfaces.
+SEED_PROMPT = """You are analyzing a room photo to identify paintable architectural surfaces.
 
-For each visible surface type, provide 2-3 seed points as [x, y] fractional coordinates
+For each visible surface, provide 2-3 seed points as [x, y] fractional coordinates
 (0.0 = left/top edge, 1.0 = right/bottom edge).
 
-Seed point rules:
-- Choose points that are clearly on the surface, not near edges or transitions
-- Avoid furniture, fixtures, windows, doors, shadows, and light sources
-- Pick points spread across the surface (not all clustered in one corner)
-- For trim: choose points on baseboards, door frames, or window moldings
+CRITICAL RULES:
+- Seeds must land on a FIXED ARCHITECTURAL surface — never on furniture, decor, appliances, or objects
+- For each seed, mentally verify: "Is this pixel attached to the building structure, not a movable object?"
+- Spread seeds across the surface — do not cluster them
+- Avoid shadows, light sources, windows, mirrors, and transition zones between surfaces
 
-Return ONLY valid JSON with no extra text:
+TRIM RULES (most important — trim is easily confused with furniture):
+- Trim = baseboards at the very bottom of walls, door frames around doorways, window moldings
+- Baseboard seeds: place them at the very bottom edge of the wall where it meets the floor (y ≈ 0.85-0.97)
+- Door frame seeds: place on the vertical or horizontal strip immediately bordering a door opening
+- NEVER place a trim seed on furniture legs, coffee tables, shelves, or any freestanding object
+- If trim is not clearly visible as architectural molding, OMIT the "trim" key entirely
+
+Return ONLY valid JSON, no extra text:
 {
   "wall": [[x1,y1], [x2,y2], [x3,y3]],
   "ceiling": [[x1,y1], [x2,y2]],
@@ -57,39 +64,58 @@ Return ONLY valid JSON with no extra text:
 }
 
 Surface definitions:
-- wall: main flat vertical painted surfaces (exclude window glass, door panels, trim strips)
+- wall: large flat vertical painted surfaces (exclude window glass, door panels, trim strips)
 - ceiling: overhead horizontal surface
-- floor: ground surface (hardwood, carpet, tile)
-- trim: baseboards, door frames, window moldings, crown molding (usually white/off-white painted wood)
+- floor: ground surface (hardwood, carpet, tile) — avoid rugs
+- trim: ONLY fixed architectural moldings — baseboards, door frames, window casings, crown molding
 
-Omit a key entirely if that surface is NOT visible in the image.
-Only return points you are highly confident about (confidence > 90%)."""
+Omit any key if that surface is not clearly visible. Only include points with >95% confidence."""
+
+
+# Coverage bounds per surface — prevents SAM picking the wrong object
+_COVERAGE_BOUNDS = {
+    "wall":    (0.05, 0.75),   # walls are large
+    "ceiling": (0.05, 0.60),   # ceiling is large
+    "floor":   (0.05, 0.60),   # floor is large
+    "trim":    (0.003, 0.12),  # trim is THIN — reject anything bigger (furniture, walls)
+}
 
 
 def _segment_surface(pil: Image.Image, surface: str, seeds: list) -> tuple[str, str | None]:
     """
     Run SAM2 for one surface using Claude-provided seed points.
-    Tries up to 2 seed points and keeps the mask with the best coverage.
-    Falls back to position-based SLIC auto-segmentation if SAM fails.
+    Tries each seed point, picks the mask whose coverage best matches the
+    expected range for that surface type (thin for trim, large for walls).
+    Falls back to position-based auto-segmentation only for non-trim surfaces.
     Returns (surface_name, mask_base64_png | None).
     """
+    cov_min, cov_max = _COVERAGE_BOUNDS.get(surface, (0.03, 0.80))
+
     try:
         best_mask = None
         best_coverage = 0.0
 
-        for seed in seeds[:2]:  # max 2 SAM calls per surface
+        for seed in seeds[:3]:  # try up to 3 seeds
             sx, sy = float(seed[0]), float(seed[1])
             try:
                 raw = _sam_segment(pil, sx, sy)
                 arr = np.array(raw)
                 coverage = float((arr > 127).sum()) / arr.size
-                # Accept masks in a sane area range (3%–80%)
-                if 0.03 <= coverage <= 0.80 and coverage > best_coverage:
+                print(f"[segment-room] {surface} seed {seed} → coverage={coverage:.2%} (bounds {cov_min:.1%}-{cov_max:.1%})")
+                # Accept only masks within the expected coverage range for this surface
+                if cov_min <= coverage <= cov_max and coverage > best_coverage:
                     best_mask = raw
                     best_coverage = coverage
+                elif coverage > cov_max:
+                    print(f"[segment-room] {surface} seed {seed} rejected — too large ({coverage:.1%} > {cov_max:.1%}), likely wrong object")
             except Exception as e:
                 print(f"[segment-room] SAM seed {seed} for {surface} failed: {e}")
                 continue
+
+        # Trim: never fall back to auto-segmentation (it would grab walls/furniture)
+        if best_mask is None and surface == "trim":
+            print(f"[segment-room] trim: no valid seed found, skipping (not returning bad mask)")
+            return surface, None
 
         if best_mask is None:
             print(f"[segment-room] SAM found nothing for {surface}, using auto fallback")
