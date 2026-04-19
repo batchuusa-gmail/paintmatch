@@ -260,7 +260,8 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   String _renderStatus = '';
   String _environment = 'interior';
   String _selectedSurface = 'wall';
-  bool _precisionMode = false;  // false = fast on-device BFS, true = SAM via API
+  // Always precision (SAM2) — BFS removed
+  final bool _precisionMode = true;
 
   late String _selectedHex;
   late String _selectedColorName;
@@ -398,58 +399,40 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
     setState(() {
       _rendering = true;
       _renderedBytes = null;
-      _renderStatus = _precisionMode ? 'Analyzing surface… (10–15s)' : 'Painting…';
+      _renderStatus = 'Analyzing surface…';
     });
 
     try {
       if (isNewTap || _cachedMaskRgba == null) {
-        if (_precisionMode) {
-          // ── Precision mode: SAM 2 via backend ─────────────────────────────
-          if (_srcJpeg == null) return;
-          final result = await ApiService().segmentWall(
-            imageBase64: base64Encode(_srcJpeg!),
-            surface: _selectedSurface,
-            seedX: _seedX,
-            seedY: _seedY,
-          );
-          final maskBytes = base64Decode(result['mask'] as String);
-          final coverage  = (result['coverage'] as double?) ?? 0.0;
+        // SAM2 via backend — only precision path
+        if (_srcJpeg == null) return;
+        final result = await ApiService().segmentWall(
+          imageBase64: base64Encode(_srcJpeg!),
+          surface: _selectedSurface,
+          seedX: _seedX,
+          seedY: _seedY,
+        );
+        final maskBytes = base64Decode(result['mask'] as String);
+        final coverage  = (result['coverage'] as double?) ?? 0.0;
 
-          if (coverage < 0.03 && mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: const Text(
-                'That looks like a small object, not a wall.\n'
-                'Tap on a plain open wall area for best results.'),
-              backgroundColor: Colors.orange.shade800,
-              duration: const Duration(seconds: 4),
-            ));
-            setState(() { _rendering = false; _renderStatus = ''; });
-            return;
-          }
-
-          final maskCodec = await ui.instantiateImageCodec(maskBytes);
-          final maskFrame = await maskCodec.getNextFrame();
-          final maskImg   = maskFrame.image;
-          final maskBd    = await maskImg.toByteData(format: ui.ImageByteFormat.rawRgba);
-          _cachedMaskRgba = maskBd!.buffer.asUint8List();
-          _cachedMaskW    = maskImg.width;
-          _cachedMaskH    = maskImg.height;
-        } else {
-          // ── Fast mode: on-device BFS — no network, <200ms ─────────────────
-          final imgW = _srcImage!.width;
-          final imgH = _srcImage!.height;
-          final sx   = (_seedX! * imgW).round().clamp(0, imgW - 1);
-          final sy   = (_seedY! * imgH).round().clamp(0, imgH - 1);
-
-          final maskRgba = await compute(_bfsIsolate, _BfsParams(
-            srcRgba: _srcRgba!, srcW: imgW, srcH: imgH,
-            seedX: sx, seedY: sy,
-            trimMode: _selectedSurface == 'trim',
+        if (coverage < 0.03 && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: const Text(
+              'Could not isolate that surface.\nTap directly on the wall/ceiling/floor area.'),
+            backgroundColor: Colors.orange.shade800,
+            duration: const Duration(seconds: 4),
           ));
-          _cachedMaskRgba = maskRgba;
-          _cachedMaskW    = imgW;
-          _cachedMaskH    = imgH;
+          setState(() { _rendering = false; _renderStatus = ''; });
+          return;
         }
+
+        final maskCodec = await ui.instantiateImageCodec(maskBytes);
+        final maskFrame = await maskCodec.getNextFrame();
+        final maskImg   = maskFrame.image;
+        final maskBd    = await maskImg.toByteData(format: ui.ImageByteFormat.rawRgba);
+        _cachedMaskRgba = maskBd!.buffer.asUint8List();
+        _cachedMaskW    = maskImg.width;
+        _cachedMaskH    = maskImg.height;
       }
 
       setState(() => _renderStatus = 'Applying color…');
@@ -501,12 +484,6 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
     } else {
       dx = (details.localPosition.dx / box.maxWidth).clamp(0.0, 1.0);
       dy = (details.localPosition.dy / box.maxHeight).clamp(0.0, 1.0);
-    }
-
-    // Trim cannot be reliably detected by color flooding alone (trim and wall
-    // share similar hues). Force precision (SAM2) mode for trim taps.
-    if (_selectedSurface == 'trim' && !_precisionMode) {
-      setState(() => _precisionMode = true);
     }
 
     _paint(seedX: dx, seedY: dy);
@@ -741,51 +718,6 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                   ]),
 
                   const SizedBox(height: 24),
-
-                  // Fast / Precision toggle
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Row(children: [
-                        Icon(
-                          _precisionMode ? Icons.hdr_on_outlined : Icons.bolt,
-                          size: 14,
-                          color: _precisionMode ? AppColors.accent : Colors.green.shade400,
-                        ),
-                        const SizedBox(width: 5),
-                        Text(
-                          _precisionMode ? 'Precision (SAM AI)' : 'Fast Mode',
-                          style: TextStyle(
-                            color: _precisionMode ? AppColors.accent : Colors.green.shade400,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          _precisionMode ? '~15s' : '< 1s',
-                          style: TextStyle(
-                              color: AppColors.textSecondary.withValues(alpha: 0.6),
-                              fontSize: 11),
-                        ),
-                      ]),
-                      Switch.adaptive(
-                        value: _precisionMode,
-                        activeColor: AppColors.accent,
-                        onChanged: _rendering ? null : (v) {
-                          setState(() {
-                            _precisionMode = v;
-                            // Clear cached mask — different algorithm = different mask
-                            _cachedMaskRgba = null;
-                            _renderedBytes  = null;
-                            _seedX = null;
-                            _seedY = null;
-                          });
-                        },
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
 
                   // What to Paint
                   const Text('What to Paint',
