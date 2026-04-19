@@ -285,7 +285,8 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   final Map<String, Uint8List> _surfaceMasks = {};
   final Map<String, int> _surfaceMaskW = {};
   final Map<String, int> _surfaceMaskH = {};
-  bool _segmenting = false;   // true while backend is running
+  bool _segmenting = false;    // true while backend is running
+  bool _segmentStarted = false; // guard — run analysis exactly once
   bool _segmentFailed = false;
   bool _showedSurfacePicker = false;  // only auto-show once per image
 
@@ -295,8 +296,11 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
     _selectedHex = widget.selectedHex;
     _selectedColorName = widget.selectedColorName;
     _loadImage();
-    // Auto-segment all surfaces as soon as screen opens (parallel with image load)
-    if (widget.imageFile != null) _autoSegmentRoom();
+    // Auto-segment all surfaces exactly once when screen opens
+    if (widget.imageFile != null && !_segmentStarted) {
+      _segmentStarted = true;
+      _autoSegmentRoom();
+    }
   }
 
   Future<void> _loadImage() async {
@@ -315,8 +319,6 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       if (mounted) setState(() { _renderStatus = 'Failed to load: $e'; });
     } finally {
       if (mounted) setState(() => _rendering = false);
-      // If segments already arrived before image finished loading, paint now
-      _autoPaintIfReady();
     }
   }
 
@@ -342,7 +344,6 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       }
       if (mounted) {
         setState(() => _segmenting = false);
-        _autoPaintIfReady();
         if (!_showedSurfacePicker && _surfaceMasks.isNotEmpty) {
           _showedSurfacePicker = true;
           _promptSurfaceSelection();
@@ -375,15 +376,6 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
         },
       ),
     );
-  }
-
-  /// Paint immediately when both image data and surface mask are ready.
-  void _autoPaintIfReady() {
-    if (_rendering || _renderedBytes != null) return; // already busy or done
-    if (_srcRgba == null || _srcImage == null) return;
-    if (_surfaceMasks.containsKey(_selectedSurface)) {
-      _applyPrecomputedMask(_selectedSurface);
-    }
   }
 
   /// Apply a pre-computed surface mask with the current selected color.

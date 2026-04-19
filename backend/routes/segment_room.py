@@ -75,9 +75,36 @@ _COVERAGE_BOUNDS = {
 _SAM_TIMEOUT_S = 25  # hard limit per surface
 
 
+def _geometric_clip(mask: Image.Image, surface: str) -> Image.Image:
+    """
+    Hard-clip a SAM2 mask to the region where that surface can physically exist.
+    This prevents wall seeds from capturing ceiling/floor and vice-versa.
+
+    Fractions are of image height (y-axis):
+      ceiling → keep only top 28%
+      floor   → keep only bottom 30%  (y >= 70%)
+      wall    → remove top 12% and bottom 12%
+      trim    → keep only bottom 22%  (baseboards / door frames at floor level)
+    """
+    arr = np.array(mask).copy()
+    h = arr.shape[0]
+
+    if surface == "ceiling":
+        arr[int(h * 0.28):, :] = 0
+    elif surface == "floor":
+        arr[:int(h * 0.70), :] = 0
+    elif surface == "wall":
+        arr[:int(h * 0.12), :] = 0   # remove ceiling band
+        arr[int(h * 0.88):, :] = 0   # remove floor band
+    elif surface == "trim":
+        arr[:int(h * 0.78), :] = 0   # trim is near floor only
+
+    return Image.fromarray(arr, "L")
+
+
 def _segment_surface(pil: Image.Image, surface: str, seeds: list) -> tuple[str, str | None]:
     """
-    Try up to 3 seeds with SAM2, pick best coverage within expected bounds.
+    Try up to 3 seeds with SAM2, apply geometric clip, pick best coverage.
     Never falls back to auto-segmentation for trim (would grab furniture/walls).
     """
     cov_min, cov_max = _COVERAGE_BOUNDS.get(surface, (0.04, 0.80))
@@ -88,12 +115,14 @@ def _segment_surface(pil: Image.Image, surface: str, seeds: list) -> tuple[str, 
         sx, sy = float(seed[0]), float(seed[1])
         try:
             raw = _sam_segment(pil, sx, sy)
-            arr = np.array(raw)
+            # Clip to geometric region before evaluating coverage
+            clipped = _geometric_clip(raw, surface)
+            arr = np.array(clipped)
             coverage = float((arr > 127).sum()) / arr.size
-            print(f"[seg-room] {surface} seed {seed} → {coverage:.1%} (ok={cov_min:.1%}-{cov_max:.1%})")
+            print(f"[seg-room] {surface} seed {seed} → {coverage:.1%} after clip (ok={cov_min:.1%}-{cov_max:.1%})")
 
             if cov_min <= coverage <= cov_max and coverage > best_coverage:
-                best_mask = raw
+                best_mask = clipped
                 best_coverage = coverage
         except Exception as e:
             print(f"[seg-room] SAM {surface} {seed} failed: {e}")
@@ -104,7 +133,7 @@ def _segment_surface(pil: Image.Image, surface: str, seeds: list) -> tuple[str, 
             return surface, None
         print(f"[seg-room] {surface}: no valid SAM mask, trying auto")
         try:
-            best_mask = _segment_auto(pil, surface)
+            best_mask = _geometric_clip(_segment_auto(pil, surface), surface)
         except Exception as e:
             print(f"[seg-room] {surface} auto failed: {e}")
             return surface, None
