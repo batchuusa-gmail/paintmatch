@@ -131,23 +131,24 @@ class _BfsParams {
   });
 }
 
-/// Flood-fill from (seedX, seedY) using RGB color similarity.
-/// Returns a 4-channel RGBA mask (same size as src) compatible with _blendIsolate.
-/// Tolerance is adaptive: derived from local color variance around the seed
-/// so flat walls get a tight fill and textured surfaces get a looser one.
+/// Edge-aware flood-fill from (seedX, seedY).
+/// Two-gate check per step:
+///   1. DRIFT gate  — pixel vs seed color (prevents wandering far from seed hue)
+///   2. EDGE gate   — neighbor vs current pixel color (stops at geometric edges/corners)
+/// Together these confine the fill to one surface even when wall and trim share similar hues.
 Uint8List _bfsIsolate(_BfsParams p) {
-  final src  = p.srcRgba;
-  final W    = p.srcW;
-  final H    = p.srcH;
+  final src   = p.srcRgba;
+  final W     = p.srcW;
+  final H     = p.srcH;
   final total = W * H;
 
   // ── 1. Sample seed color ─────────────────────────────────────────────────
-  final si = (p.seedY * W + p.seedX) * 4;
+  final si    = (p.seedY * W + p.seedX) * 4;
   final seedR = src[si].toDouble();
   final seedG = src[si + 1].toDouble();
   final seedB = src[si + 2].toDouble();
 
-  // ── 2. Adaptive tolerance from 15×15 local neighbourhood ─────────────────
+  // ── 2. Adaptive base tolerance from 15×15 neighbourhood ──────────────────
   double variance = 0; int count = 0;
   for (int dy = -7; dy <= 7; dy++) {
     for (int dx = -7; dx <= 7; dx++) {
@@ -161,18 +162,26 @@ Uint8List _bfsIsolate(_BfsParams p) {
       count++;
     }
   }
-  variance /= (count * 3);  // avg per-channel squared deviation
-  // trim mode: very tight (8–15) to stay within narrow baseboards/door frames
-  // normal: adaptive 22–58 based on local texture variance
-  final double maxTol = p.trimMode ? 15.0 : 58.0;
-  final double minTol = p.trimMode ? 8.0 : 22.0;
-  final tolerance = (minTol + math.sqrt(variance)).clamp(minTol, maxTol);
-  final tolSq     = tolerance * tolerance * 3;  // squared, 3 channels
+  variance /= (count * 3);
 
-  // ── 3. BFS with a pre-allocated Int32List ring buffer ────────────────────
-  final mask    = Uint8List(total * 4);   // RGBA output — 0 everywhere
-  final visited = Uint8List(total);       // 0=unseen 1=seen
-  final queue   = Int32List(total);       // pixel indices
+  // Drift tolerance: how far a pixel can stray in colour from the seed
+  //   trim: very tight  (6–14) — baseboards/door frames are narrow, same-colour walls adjacent
+  //   wall: adaptive (20–52) based on texture variance
+  final double driftMax = p.trimMode ? 14.0 : 52.0;
+  final double driftMin = p.trimMode ?  6.0 : 20.0;
+  final double driftTol = (driftMin + math.sqrt(variance)).clamp(driftMin, driftMax);
+  final double driftSq  = driftTol * driftTol * 3;
+
+  // Edge tolerance: max colour step allowed between two adjacent pixels when walking the frontier.
+  // A hard edge (corner, shadow, surface boundary) produces a large step → stop there.
+  //   trim: very tight (8) — stop at the slightest shadow/corner
+  //   wall: moderate  (22) — allow gentle gradients
+  final double edgeSq = p.trimMode ? (8.0 * 8.0 * 3) : (22.0 * 22.0 * 3);
+
+  // ── 3. BFS ────────────────────────────────────────────────────────────────
+  final mask    = Uint8List(total * 4);
+  final visited = Uint8List(total);
+  final queue   = Int32List(total);
   int   qHead = 0, qTail = 0;
 
   final seedPx = p.seedY * W + p.seedX;
@@ -183,22 +192,36 @@ Uint8List _bfsIsolate(_BfsParams p) {
     final px = queue[qHead++];
     final pi = px * 4;
 
+    // Gate 1 — drift: skip pixels too far in colour from seed
     final dr = src[pi]     - seedR;
     final dg = src[pi + 1] - seedG;
     final db = src[pi + 2] - seedB;
-    if (dr*dr + dg*dg + db*db > tolSq) continue;
+    if (dr*dr + dg*dg + db*db > driftSq) continue;
 
     // Mark as painted
     mask[pi] = mask[pi + 1] = mask[pi + 2] = mask[pi + 3] = 255;
 
-    final x = px % W;
-    final y = px ~/ W;
+    final x  = px % W;
+    final y  = px ~/ W;
+    final pR = src[pi].toDouble();
+    final pG = src[pi + 1].toDouble();
+    final pB = src[pi + 2].toDouble();
 
-    // 4-connected neighbours
-    if (x > 0)     { final n = px - 1; if (visited[n] == 0) { visited[n] = 1; queue[qTail++] = n; } }
-    if (x < W - 1) { final n = px + 1; if (visited[n] == 0) { visited[n] = 1; queue[qTail++] = n; } }
-    if (y > 0)     { final n = px - W; if (visited[n] == 0) { visited[n] = 1; queue[qTail++] = n; } }
-    if (y < H - 1) { final n = px + W; if (visited[n] == 0) { visited[n] = 1; queue[qTail++] = n; } }
+    // 4-connected neighbours — Gate 2 (edge): reject if adjacent step too large
+    void tryNeighbor(int n) {
+      if (visited[n] != 0) return;
+      visited[n] = 1;
+      final ni = n * 4;
+      final er = src[ni].toDouble()     - pR;
+      final eg = src[ni + 1].toDouble() - pG;
+      final eb = src[ni + 2].toDouble() - pB;
+      if (er*er + eg*eg + eb*eb <= edgeSq) queue[qTail++] = n;
+    }
+
+    if (x > 0)     tryNeighbor(px - 1);
+    if (x < W - 1) tryNeighbor(px + 1);
+    if (y > 0)     tryNeighbor(px - W);
+    if (y < H - 1) tryNeighbor(px + W);
   }
 
   return mask;
@@ -454,9 +477,14 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   }
 
   void _onImageTap(TapUpDetails details, BoxConstraints box) {
+    // If a precomputed SAM2 mask already exists for the selected surface,
+    // use it directly — no need to run BFS from the tap point.
+    if (_surfaceMasks.containsKey(_selectedSurface)) {
+      _applyPrecomputedMask(_selectedSurface);
+      return;
+    }
+
     // BoxFit.cover crops the image — correct tap coords to image space.
-    // Without this, tapping the wall on a portrait photo sends wrong
-    // coordinates to SAM (e.g. hits a switch instead of the wall).
     double dx, dy;
     if (_srcImage != null) {
       final imgW = _srcImage!.width.toDouble();
@@ -474,6 +502,13 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       dx = (details.localPosition.dx / box.maxWidth).clamp(0.0, 1.0);
       dy = (details.localPosition.dy / box.maxHeight).clamp(0.0, 1.0);
     }
+
+    // Trim cannot be reliably detected by color flooding alone (trim and wall
+    // share similar hues). Force precision (SAM2) mode for trim taps.
+    if (_selectedSurface == 'trim' && !_precisionMode) {
+      setState(() => _precisionMode = true);
+    }
+
     _paint(seedX: dx, seedY: dy);
   }
 
