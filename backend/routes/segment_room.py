@@ -1,14 +1,17 @@
 """
 POST /api/segment-room
-Auto-segments ALL paintable surfaces in a room image (wall, ceiling, floor, trim).
+Auto-segments ALL paintable surfaces in a room image.
 
-Pipeline:
-  1. Claude Vision identifies 2-3 seed coordinates per surface in one API call.
-  2. SAM 2 runs in parallel for each detected surface (wall/ceiling/floor/trim).
-  3. Each surface uses the best seed; falls back to position-based SLIC if SAM fails.
-  4. Returns base64 PNG masks keyed by surface name.
+Two-pass pipeline:
+  Pass 1 — Scene analysis: Claude identifies shot type, obstacle locations
+            (doors, windows, furniture), and safe zones per surface.
+  Pass 2 — Seed placement: Claude places precise seeds using the obstacle map.
+  Pass 3 — SAM2 runs in parallel for all surfaces using best seeds.
 
-Total latency: ~20-30s (Claude Vision ~5s + parallel SAM2 ~15-20s).
+Two-pass approach handles wide shots and rooms with doors much better than
+single-pass: obstacles are mapped first so seeds are never placed near them.
+
+Total latency: ~25-35s (2x Claude ~8s + parallel SAM2 ~20s).
 """
 import base64
 import io
@@ -22,7 +25,6 @@ import numpy as np
 from flask import Blueprint, jsonify, request
 from PIL import Image, ImageOps
 
-# Reuse helpers from segment_wall — _sam_segment, _segment_auto, _clean
 from routes.segment_wall import _sam_segment, _segment_auto, _clean
 
 segment_room_bp = Blueprint("segment_room", __name__)
@@ -37,103 +39,175 @@ def _get_client() -> anthropic.Anthropic:
     return _anthropic_client
 
 
-SEED_PROMPT = """You are analyzing a room photo to identify paintable architectural surfaces.
+# ── Pass 1: Scene geometry analysis ──────────────────────────────────────────
 
-For each visible surface, provide 2-3 seed points as [x, y] fractional coordinates
-(0.0 = left/top edge, 1.0 = right/bottom edge).
+SCENE_ANALYSIS_PROMPT = """Analyze this room photo and return a JSON scene map.
 
-CRITICAL RULES:
-- Seeds must land on a FIXED ARCHITECTURAL surface — never on furniture, decor, appliances, or objects
-- For each seed, mentally verify: "Is this pixel attached to the building structure, not a movable object?"
-- Spread seeds across the surface — do not cluster them
-- Avoid shadows, light sources, windows, mirrors, and transition zones between surfaces
-
-TRIM RULES (most important — trim is easily confused with furniture):
-- Trim = baseboards at the very bottom of walls, door frames around doorways, window moldings
-- Baseboard seeds: place them at the very bottom edge of the wall where it meets the floor (y ≈ 0.85-0.97)
-- Door frame seeds: place on the vertical or horizontal strip immediately bordering a door opening
-- NEVER place a trim seed on furniture legs, coffee tables, shelves, or any freestanding object
-- If trim is not clearly visible as architectural molding, OMIT the "trim" key entirely
+TASK: Identify obstacles and safe paintable zones. This will be used to place
+segmentation seeds — seeds must land on a pure, unobstructed surface.
 
 Return ONLY valid JSON, no extra text:
 {
+  "shot_type": "wide-angle" | "close-up" | "corner" | "single-wall",
+  "obstacles": [
+    {"type": "door" | "window" | "furniture" | "fireplace" | "artwork" | "light_fixture",
+     "cx": 0.5, "cy": 0.5, "approx_width": 0.15, "approx_height": 0.4}
+  ],
+  "surfaces": {
+    "wall": {
+      "visible": true,
+      "segments": [
+        {"cx": 0.2, "cy": 0.5, "clear_radius": 0.08},
+        {"cx": 0.75, "cy": 0.45, "clear_radius": 0.10}
+      ]
+    },
+    "ceiling": {
+      "visible": true,
+      "segments": [{"cx": 0.5, "cy": 0.07, "clear_radius": 0.12}]
+    },
+    "floor": {
+      "visible": true,
+      "segments": [{"cx": 0.5, "cy": 0.88, "clear_radius": 0.10}]
+    },
+    "trim": {
+      "visible": false,
+      "segments": []
+    }
+  },
+  "notes": "Wide shot with door on left; two wall segments visible"
+}
+
+RULES:
+- cx, cy = center of a clear, unobstructed area on that surface (0-1 fractional coords)
+- clear_radius = estimated radius (in fractional image units) that is free of obstacles
+- Wall segments: identify EACH visually separate wall section (a door splits one wall into two)
+- For wide shots, list all visible wall sections separately
+- Ceiling: pick center of ceiling away from light fixtures
+- Floor: pick open floor area, avoid rugs and furniture shadows
+- Trim: ONLY if clearly visible as baseboards/door frames; set visible=false if uncertain
+- Obstacles: list every door, window, large piece of furniture, anything that is NOT a flat wall/ceiling/floor
+- If a surface is not visible, set visible=false and segments=[]"""
+
+
+# ── Pass 2: Precise seed placement using scene map ────────────────────────────
+
+def _build_seed_prompt(scene: dict) -> str:
+    return f"""You already analyzed this room photo and produced this scene map:
+{json.dumps(scene, indent=2)}
+
+Now place precise segmentation seed points for each visible surface.
+
+RULES:
+1. Each seed [x, y] must land EXACTLY on the surface — not on furniture, door panels, or transitions.
+2. Use the obstacle locations and clear_radius from the scene map to stay well away from obstacles.
+3. For walls: place seeds in the center of each wall segment. If a door splits a wall, place one seed left of the door and one right of the door.
+4. For ceiling: place seed away from light fixtures and ceiling fans.
+5. For floor: place seed on open floor, not on rugs or near furniture feet.
+6. For trim: place ONLY at y ≥ 0.85 (baseboard) or immediately on a door/window frame — never on furniture.
+7. Each surface should have 3-5 seeds spread across it (not clustered).
+
+Return ONLY valid JSON:
+{{
   "wall": [[x1,y1], [x2,y2], [x3,y3]],
   "ceiling": [[x1,y1], [x2,y2]],
   "floor": [[x1,y1], [x2,y2]],
   "trim": [[x1,y1], [x2,y2]]
-}
+}}
 
-Surface definitions:
-- wall: large flat vertical painted surfaces (exclude window glass, door panels, trim strips)
-- ceiling: overhead horizontal surface
-- floor: ground surface (hardwood, carpet, tile) — avoid rugs
-- trim: ONLY fixed architectural moldings — baseboards, door frames, window casings, crown molding
-
-Omit any key if that surface is not clearly visible. Only include points with >95% confidence."""
+Include ONLY surfaces where visible=true in the scene map.
+Omit a key entirely if that surface is not visible."""
 
 
-# Coverage bounds per surface — prevents SAM picking the wrong object
+# ── Coverage bounds per surface ───────────────────────────────────────────────
+
 _COVERAGE_BOUNDS = {
-    "wall":    (0.05, 0.75),   # walls are large
-    "ceiling": (0.05, 0.60),   # ceiling is large
-    "floor":   (0.05, 0.60),   # floor is large
-    "trim":    (0.003, 0.12),  # trim is THIN — reject anything bigger (furniture, walls)
+    "wall":    (0.04, 0.80),
+    "ceiling": (0.04, 0.65),
+    "floor":   (0.04, 0.65),
+    "trim":    (0.003, 0.12),  # thin strips only — reject furniture
 }
+
+
+def _call_claude_vision(client, image_b64: str, prompt: str, max_tokens: int = 1024) -> str:
+    """Single Claude Vision call. Returns raw text response."""
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=max_tokens,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64},
+                },
+                {"type": "text", "text": prompt},
+            ],
+        }],
+    )
+    return response.content[0].text.strip()
+
+
+def _parse_json(text: str) -> dict:
+    """Extract and parse JSON from Claude response."""
+    text = re.sub(r"^```[a-z]*\n?", "", text)
+    text = re.sub(r"\n?```$", "", text).strip()
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        return json.loads(match.group())
+    return json.loads(text)
 
 
 def _segment_surface(pil: Image.Image, surface: str, seeds: list) -> tuple[str, str | None]:
     """
-    Run SAM2 for one surface using Claude-provided seed points.
-    Tries each seed point, picks the mask whose coverage best matches the
-    expected range for that surface type (thin for trim, large for walls).
-    Falls back to position-based auto-segmentation only for non-trim surfaces.
-    Returns (surface_name, mask_base64_png | None).
+    Run SAM2 for one surface. Tries all provided seeds, picks the mask with
+    the best coverage within expected bounds for that surface type.
+    Never falls back to auto-segmentation for trim.
     """
-    cov_min, cov_max = _COVERAGE_BOUNDS.get(surface, (0.03, 0.80))
+    cov_min, cov_max = _COVERAGE_BOUNDS.get(surface, (0.04, 0.80))
 
     try:
         best_mask = None
         best_coverage = 0.0
 
-        for seed in seeds[:3]:  # try up to 3 seeds
+        for seed in seeds[:5]:  # try up to 5 seeds
             sx, sy = float(seed[0]), float(seed[1])
             try:
                 raw = _sam_segment(pil, sx, sy)
                 arr = np.array(raw)
                 coverage = float((arr > 127).sum()) / arr.size
-                print(f"[segment-room] {surface} seed {seed} → coverage={coverage:.2%} (bounds {cov_min:.1%}-{cov_max:.1%})")
-                # Accept only masks within the expected coverage range for this surface
+                print(f"[segment-room] {surface} seed {seed} → {coverage:.2%} (bounds {cov_min:.1%}-{cov_max:.1%})")
+
                 if cov_min <= coverage <= cov_max and coverage > best_coverage:
                     best_mask = raw
                     best_coverage = coverage
                 elif coverage > cov_max:
-                    print(f"[segment-room] {surface} seed {seed} rejected — too large ({coverage:.1%} > {cov_max:.1%}), likely wrong object")
+                    print(f"[segment-room] {surface} seed {seed} rejected — too large ({coverage:.1%}), likely wrong object")
+                elif coverage < cov_min:
+                    print(f"[segment-room] {surface} seed {seed} rejected — too small ({coverage:.1%})")
             except Exception as e:
                 print(f"[segment-room] SAM seed {seed} for {surface} failed: {e}")
-                continue
 
-        # Trim: never fall back to auto-segmentation (it would grab walls/furniture)
+        # Trim: never fall back (would grab walls or furniture)
         if best_mask is None and surface == "trim":
-            print(f"[segment-room] trim: no valid seed found, skipping (not returning bad mask)")
+            print(f"[segment-room] trim: no valid mask found, skipping")
             return surface, None
 
         if best_mask is None:
-            print(f"[segment-room] SAM found nothing for {surface}, using auto fallback")
+            print(f"[segment-room] {surface}: no valid SAM mask, trying auto fallback")
             best_mask = _segment_auto(pil, surface)
 
         cleaned = _clean(best_mask)
         buf = io.BytesIO()
         cleaned.save(buf, format="PNG")
-        mask_b64 = base64.b64encode(buf.getvalue()).decode()
-
         arr = np.array(cleaned)
         coverage = float((arr > 127).sum()) / arr.size
-        print(f"[segment-room] {surface}: coverage={coverage:.2%}")
-        return surface, mask_b64
+        print(f"[segment-room] {surface}: final coverage={coverage:.2%}")
+        return surface, base64.b64encode(buf.getvalue()).decode()
 
     except Exception as e:
         print(f"[segment-room] {surface} completely failed: {e}")
-        # Last-resort: try auto fallback
+        if surface == "trim":
+            return surface, None
         try:
             raw = _segment_auto(pil, surface)
             cleaned = _clean(raw)
@@ -154,7 +228,6 @@ def segment_room():
         if not image_b64:
             return jsonify({"error": "image_b64 required"}), 400
 
-        # Strip data-URI prefix if present
         if "," in image_b64:
             image_b64 = image_b64.split(",", 1)[1]
 
@@ -166,67 +239,52 @@ def segment_room():
         except Exception as e:
             return jsonify({"error": f"Image decode failed: {e}"}), 400
 
-        # ── Step 1: Claude Vision → seed coordinates for each surface ──────────
+        client = _get_client()
+
+        # ── Pass 1: Scene geometry analysis ──────────────────────────────────
+        scene = {}
+        try:
+            raw1 = _call_claude_vision(client, image_b64, SCENE_ANALYSIS_PROMPT, max_tokens=800)
+            scene = _parse_json(raw1)
+            print(f"[segment-room] Scene analysis: shot_type={scene.get('shot_type')}, "
+                  f"obstacles={len(scene.get('obstacles', []))}, "
+                  f"notes={scene.get('notes', '')[:80]}")
+        except Exception as e:
+            print(f"[segment-room] Scene analysis failed: {e}")
+            scene = {"shot_type": "unknown", "obstacles": [], "surfaces": {}, "notes": ""}
+
+        # ── Pass 2: Precise seed placement ────────────────────────────────────
         seeds_by_surface: dict = {}
         try:
-            client = _get_client()
-            response = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=512,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": image_b64,
-                            },
-                        },
-                        {"type": "text", "text": SEED_PROMPT},
-                    ],
-                }],
-            )
-
-            raw_text = response.content[0].text.strip()
-            # Strip markdown fences
-            if raw_text.startswith("```"):
-                raw_text = raw_text.split("```")[1]
-                if raw_text.startswith("json"):
-                    raw_text = raw_text[4:]
-                raw_text = raw_text.strip()
-
-            # Extract JSON object
-            json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-            if json_match:
-                seeds_by_surface = json.loads(json_match.group())
-            print(f"[segment-room] Claude seeds: {seeds_by_surface}")
-
+            seed_prompt = _build_seed_prompt(scene)
+            raw2 = _call_claude_vision(client, image_b64, seed_prompt, max_tokens=512)
+            seeds_by_surface = _parse_json(raw2)
+            print(f"[segment-room] Seeds placed: {list(seeds_by_surface.keys())}")
         except Exception as e:
-            print(f"[segment-room] Claude seed extraction failed: {e}")
-            # Position-based defaults — wall centre, ceiling top, floor bottom
-            seeds_by_surface = {
-                "wall":    [[0.50, 0.50], [0.25, 0.50]],
-                "ceiling": [[0.50, 0.08], [0.75, 0.08]],
-                "floor":   [[0.50, 0.90], [0.75, 0.90]],
-            }
+            print(f"[segment-room] Seed placement failed: {e}, using scene segment centers")
 
-        # Ensure at least wall/ceiling/floor are present
+        # Fallback: derive seeds from scene analysis segment centers
+        if not seeds_by_surface:
+            surfaces_info = scene.get("surfaces", {})
+            for surf, info in surfaces_info.items():
+                if info.get("visible") and info.get("segments"):
+                    seeds_by_surface[surf] = [
+                        [seg["cx"], seg["cy"]] for seg in info["segments"]
+                    ]
+
+        # Final fallback: positional defaults
         if not seeds_by_surface.get("wall"):
-            seeds_by_surface["wall"] = [[0.50, 0.50], [0.25, 0.50]]
+            seeds_by_surface["wall"] = [[0.25, 0.45], [0.75, 0.45], [0.50, 0.40]]
         if not seeds_by_surface.get("ceiling"):
-            seeds_by_surface["ceiling"] = [[0.50, 0.08]]
+            seeds_by_surface["ceiling"] = [[0.50, 0.06], [0.25, 0.06], [0.75, 0.06]]
         if not seeds_by_surface.get("floor"):
-            seeds_by_surface["floor"] = [[0.50, 0.90]]
+            seeds_by_surface["floor"] = [[0.50, 0.92], [0.25, 0.92], [0.75, 0.92]]
 
-        # ── Step 2: Parallel SAM2 for all surfaces ──────────────────────────────
+        # ── Pass 3: Parallel SAM2 for all surfaces ────────────────────────────
         masks: dict[str, str] = {}
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = {
-                executor.submit(
-                    _segment_surface, pil, surface, seeds
-                ): surface
+                executor.submit(_segment_surface, pil, surface, seeds): surface
                 for surface, seeds in seeds_by_surface.items()
             }
             for future in as_completed(futures):
@@ -239,6 +297,11 @@ def segment_room():
                 "masks": masks,
                 "detected_surfaces": list(masks.keys()),
                 "seeds": seeds_by_surface,
+                "scene": {
+                    "shot_type": scene.get("shot_type", "unknown"),
+                    "obstacle_count": len(scene.get("obstacles", [])),
+                    "notes": scene.get("notes", ""),
+                },
             },
             "error": None,
         })
