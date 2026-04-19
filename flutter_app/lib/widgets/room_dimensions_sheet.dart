@@ -16,10 +16,10 @@ void showRoomDimensionsSheet(
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
     builder: (_) => RoomDimensionsSheet(
-      estimatedWallWidthFt: estimate.estimatedWallWidthFt,
-      estimatedRoomDepthFt: estimate.estimatedRoomDepthFt,
+      estimatedWallWidthFt: estimate.walls.isNotEmpty ? estimate.walls.first.widthFt : 12.0,
+      estimatedRoomDepthFt: estimate.walls.length > 2 ? estimate.walls[2].widthFt : 12.0,
       confidence: estimate.confidence,
-      referenceObject: estimate.referenceObject,
+      referenceObject: estimate.notes,
       onConfirmed: onConfirmed,
     ),
   );

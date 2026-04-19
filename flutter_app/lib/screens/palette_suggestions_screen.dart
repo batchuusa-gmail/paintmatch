@@ -70,18 +70,6 @@ class _PaletteSuggestionsScreenState extends State<PaletteSuggestionsScreen> {
 
   PaletteSuggestion get _selected => widget.analysis.recommendedPalettes[_selectedIndex];
 
-  /// Auto-build RoomDimensions from AI estimate — defaults: 9ft ceiling, 1 door, 1 window
-  RoomDimensions? get _autoDimensions {
-    final e = _dimensionEstimate;
-    if (e == null) return null;
-    return RoomDimensions(
-      ceilingHeightFt: 9.0,
-      wallWidthFt: e.estimatedWallWidthFt,
-      roomDepthFt: e.estimatedRoomDepthFt,
-      doorCount: 1,
-      windowCount: 1,
-    );
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -185,6 +173,7 @@ class _PaletteSuggestionsScreenState extends State<PaletteSuggestionsScreen> {
                   context,
                   vendorMatches: _vendorMatches ?? [],
                   paletteName: _selected.name,
+                  estimate: _dimensionEstimate,
                 ),
                 child: Container(
                   padding: const EdgeInsets.all(16),
@@ -258,9 +247,12 @@ class _PaletteSuggestionsScreenState extends State<PaletteSuggestionsScreen> {
                       color: AppColors.accent, size: 14),
                   const SizedBox(width: 6),
                   Text(
-                    _dimensionEstimate!.confidence == 'low'
-                        ? 'AI estimated room (~${_dimensionEstimate!.estimatedWallWidthFt.toStringAsFixed(0)}×${_dimensionEstimate!.estimatedRoomDepthFt.toStringAsFixed(0)} ft)'
-                        : 'Detected ${_dimensionEstimate!.referenceObject} — ${_dimensionEstimate!.estimatedWallWidthFt.toStringAsFixed(0)}×${_dimensionEstimate!.estimatedRoomDepthFt.toStringAsFixed(0)} ft',
+                    () {
+                      final e = _dimensionEstimate!;
+                      final wallCount = e.walls.length;
+                      final area = e.paintableWallSqft.toStringAsFixed(0);
+                      return '$wallCount walls detected · $area sq ft paintable';
+                    }(),
                     style: const TextStyle(
                         color: AppColors.textSecondary, fontSize: 12),
                   ),
@@ -268,7 +260,7 @@ class _PaletteSuggestionsScreenState extends State<PaletteSuggestionsScreen> {
               ),
               const SizedBox(height: 12),
               PaintCalculatorCard(
-                dimensions: _autoDimensions!,
+                dimensions: _dimensionEstimate!,
                 vendors: _vendorMatches ?? [],
               ),
             ],

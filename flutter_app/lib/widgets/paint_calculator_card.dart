@@ -7,7 +7,7 @@ import '../models/paint_color.dart';
 import '../models/room_dimensions.dart';
 
 class PaintCalculatorCard extends StatefulWidget {
-  final RoomDimensions dimensions;
+  final DimensionEstimate dimensions;
   final List<PaintColor> vendors;
 
   const PaintCalculatorCard({
@@ -25,20 +25,11 @@ class _PaintCalculatorCardState extends State<PaintCalculatorCard> {
 
   // ── Calculation ─────────────────────────────────────────────────────────────
 
-  double get _totalWallArea {
-    final w = widget.dimensions.wallWidthFt;
-    final d = widget.dimensions.roomDepthFt;
-    final h = widget.dimensions.ceilingHeightFt;
-    return (w * 2 + d * 2) * h;
-  }
+  double get _totalWallArea => widget.dimensions.grossWallSqft;
+  double get _subtract => widget.dimensions.openingsSqft;
+  double get _paintableArea => widget.dimensions.paintableWallSqft;
 
-  double get _subtract =>
-      (widget.dimensions.doorCount * 21.0) +
-      (widget.dimensions.windowCount * 15.0);
-
-  double get _paintableArea => max(0, _totalWallArea - _subtract);
-
-  int get _gallonsOneCoat => (_paintableArea / 400).ceil();
+  int get _gallonsOneCoat => max(1, (_paintableArea / 400).ceil());
   int get _gallonsNeeded => _twoCoats ? _gallonsOneCoat * 2 : _gallonsOneCoat;
 
   double _costFor(PaintColor vendor) {
