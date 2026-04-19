@@ -287,6 +287,7 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   final Map<String, int> _surfaceMaskH = {};
   bool _segmenting = false;   // true while backend is running
   bool _segmentFailed = false;
+  bool _showedSurfacePicker = false;  // only auto-show once per image
 
   @override
   void initState() {
@@ -339,12 +340,41 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
           }
         } catch (_) {}
       }
-      if (mounted) setState(() => _segmenting = false);
-      _autoPaintIfReady();
+      if (mounted) {
+        setState(() => _segmenting = false);
+        _autoPaintIfReady();
+        if (!_showedSurfacePicker && _surfaceMasks.isNotEmpty) {
+          _showedSurfacePicker = true;
+          _promptSurfaceSelection();
+        }
+      }
     } catch (e) {
       debugPrint('[AutoSegment] $e');
       if (mounted) setState(() { _segmenting = false; _segmentFailed = true; });
     }
+  }
+
+  /// Auto-show surface picker after room analysis completes.
+  void _promptSurfaceSelection() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isDismissible: true,
+      builder: (_) => _SurfacePickerSheet(
+        availableSurfaces: _surfaceMasks.keys.toList(),
+        onPick: (surface) {
+          Navigator.of(context).pop();
+          setState(() {
+            _selectedSurface = surface;
+            _renderedBytes = null;
+            _seedX = null;
+            _seedY = null;
+            _cachedMaskRgba = null;
+          });
+          _applyPrecomputedMask(surface);
+        },
+      ),
+    );
   }
 
   /// Paint immediately when both image data and surface mask are ready.
@@ -651,7 +681,36 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                     // ── Saved image view (no imageFile = no tap-to-paint) ──
                     : widget.imageFile == null
                         ? _buildOriginalImage()
-                    // ── Tap-to-paint mode ──
+                    // ── Analyzing room overlay ──
+                    : _segmenting
+                        ? Stack(fit: StackFit.expand, children: [
+                            _buildOriginalImage(),
+                            Container(color: Colors.black.withValues(alpha: 0.55)),
+                            Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+                              const SizedBox(
+                                width: 36, height: 36,
+                                child: CircularProgressIndicator(
+                                    color: AppColors.accent, strokeWidth: 2.5),
+                              ),
+                              const SizedBox(height: 16),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                                decoration: BoxDecoration(
+                                  color: Colors.black54,
+                                  borderRadius: BorderRadius.circular(20)),
+                                child: const Column(mainAxisSize: MainAxisSize.min, children: [
+                                  Text('Analyzing your room…',
+                                      style: TextStyle(color: Colors.white,
+                                          fontSize: 15, fontWeight: FontWeight.w700)),
+                                  SizedBox(height: 4),
+                                  Text('Mapping walls, ceiling & floor with AI',
+                                      style: TextStyle(color: AppColors.textSecondary,
+                                          fontSize: 12)),
+                                ]),
+                              ),
+                            ])),
+                          ])
+                    // ── Tap-to-paint mode (fallback when no masks) ──
                     : LayoutBuilder(builder: (ctx, box) => GestureDetector(
                         onTapUp: (d) => _onImageTap(d, box),
                         child: Stack(fit: StackFit.expand, children: [
@@ -725,34 +784,33 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                           fontWeight: FontWeight.w600, letterSpacing: 0.8)),
                   const SizedBox(height: 10),
                   // Segmentation status banner
-                  if (_segmenting)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 10),
-                      child: Row(children: [
-                        const SizedBox(
-                          width: 12, height: 12,
-                          child: CircularProgressIndicator(
-                              color: AppColors.accent, strokeWidth: 2),
-                        ),
-                        const SizedBox(width: 8),
-                        const Text('Mapping surfaces with AI…',
-                            style: TextStyle(
-                                color: AppColors.textSecondary, fontSize: 12)),
-                      ]),
-                    )
-                  else if (_surfaceMasks.isNotEmpty)
+                  if (_surfaceMasks.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(bottom: 10),
                       child: Row(children: [
                         const Icon(Icons.check_circle,
                             color: AppColors.accent, size: 13),
                         const SizedBox(width: 6),
-                        Text(
-                          '${_surfaceMasks.length} surfaces mapped — tap chip to paint',
+                        Expanded(child: Text(
+                          '${_surfaceMasks.length} surfaces ready — tap chip below to paint',
                           style: const TextStyle(
                               color: AppColors.accent,
                               fontSize: 11,
                               fontWeight: FontWeight.w600),
+                        )),
+                        GestureDetector(
+                          onTap: _promptSurfaceSelection,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: AppColors.accentDim,
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(color: AppColors.accent, width: 0.8),
+                            ),
+                            child: const Text('Pick surface',
+                                style: TextStyle(color: AppColors.accent,
+                                    fontSize: 11, fontWeight: FontWeight.w600)),
+                          ),
                         ),
                       ]),
                     )
@@ -1051,6 +1109,101 @@ class _EnvChip extends StatelessWidget {
             color: selected ? Colors.black : AppColors.textSecondary,
             fontSize: 13, fontWeight: selected ? FontWeight.w700 : FontWeight.normal)),
         ]),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Surface Picker Bottom Sheet — shown automatically after room analysis
+// ─────────────────────────────────────────────────────────────────────────────
+class _SurfacePickerSheet extends StatelessWidget {
+  final List<String> availableSurfaces;
+  final void Function(String surface) onPick;
+
+  const _SurfacePickerSheet({
+    required this.availableSurfaces,
+    required this.onPick,
+  });
+
+  static const _surfaceInfo = {
+    'wall':    (Icons.format_paint, 'Walls'),
+    'ceiling': (Icons.roofing, 'Ceiling'),
+    'floor':   (Icons.layers, 'Floor'),
+    'trim':    (Icons.border_all_outlined, 'Trim'),
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    // Keep order: wall, ceiling, floor, trim
+    final ordered = ['wall', 'ceiling', 'floor', 'trim']
+        .where(availableSurfaces.contains)
+        .toList();
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: AppColors.card,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Handle
+          Container(
+            margin: const EdgeInsets.only(top: 10, bottom: 20),
+            width: 40, height: 4,
+            decoration: BoxDecoration(
+              color: AppColors.border,
+              borderRadius: BorderRadius.circular(2)),
+          ),
+          Row(children: [
+            const Icon(Icons.check_circle, color: AppColors.accent, size: 18),
+            const SizedBox(width: 8),
+            Text('Room analyzed!',
+                style: GoogleFonts.playfairDisplay(
+                    color: AppColors.textPrimary,
+                    fontSize: 20, fontWeight: FontWeight.w600)),
+          ]),
+          const SizedBox(height: 6),
+          const Text('What would you like to paint?',
+              style: TextStyle(color: AppColors.textSecondary, fontSize: 14)),
+          const SizedBox(height: 24),
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: ordered.map((id) {
+              final info = _surfaceInfo[id];
+              final icon = info?.$1 ?? Icons.format_paint;
+              final label = info?.$2 ?? id;
+              return GestureDetector(
+                onTap: () => onPick(id),
+                child: Container(
+                  width: (MediaQuery.of(context).size.width - 64) / 2,
+                  padding: const EdgeInsets.symmetric(vertical: 20),
+                  decoration: BoxDecoration(
+                    color: AppColors.background,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: AppColors.accent.withValues(alpha: 0.4)),
+                  ),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(icon, color: AppColors.accent, size: 28),
+                    const SizedBox(height: 10),
+                    Text(label,
+                        style: const TextStyle(color: AppColors.textPrimary,
+                            fontSize: 15, fontWeight: FontWeight.w600)),
+                  ]),
+                ),
+              );
+            }).toList(),
+          ),
+          const SizedBox(height: 16),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('I\'ll tap manually',
+                style: TextStyle(color: AppColors.textSecondary, fontSize: 13)),
+          ),
+        ],
       ),
     );
   }
