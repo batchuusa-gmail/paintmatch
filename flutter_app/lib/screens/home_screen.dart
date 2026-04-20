@@ -216,7 +216,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                   Row(children: [
                     // Admin button — only for admin email
-                    if (SupabaseService().currentUser?.email == 'batchuusa@gmail.com')
+                    if (['11d04c21-23c6-4600-825d-ec49d381b06d',
+                         'batchuusa@gmail.com', 'batchuusa@yahoo.com']
+                        .contains(SupabaseService().currentUser?.id ??
+                                  SupabaseService().currentUser?.email))
                       IconButton(
                         icon: const Icon(Icons.admin_panel_settings_outlined,
                             color: AppColors.accent),

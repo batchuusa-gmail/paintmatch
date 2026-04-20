@@ -263,11 +263,11 @@ class _PainterCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final active   = painter['subscription_active'] as bool? ?? false;
-    final verified = painter['is_verified'] as bool? ?? false;
+    final active   = (painter['subscription_active'] as bool?) ?? false;
+    final verified = (painter['is_verified'] as bool?) ?? false;
     final rating   = (painter['avg_rating'] as num?)?.toDouble() ?? 0.0;
-    final reviews  = painter['total_reviews'] as int? ?? 0;
-    final created  = painter['created_at'] as String? ?? '';
+    final reviews  = (painter['total_reviews'] as num?)?.toInt() ?? 0;
+    final created  = (painter['created_at'] as String?) ?? '';
     final date     = created.isNotEmpty
         ? created.substring(0, 10)
         : '—';
@@ -322,8 +322,8 @@ class _PainterCard extends StatelessWidget {
         if ((painter['specialties'] as List?)?.isNotEmpty == true) ...[
           const SizedBox(height: 8),
           Wrap(spacing: 6, children: [
-            for (final s in (painter['specialties'] as List))
-              _Chip(s as String, AppColors.textSecondary),
+            for (final s in (painter['specialties'] as List? ?? []))
+              _Chip(s.toString(), AppColors.textSecondary),
           ]),
         ],
       ]),
