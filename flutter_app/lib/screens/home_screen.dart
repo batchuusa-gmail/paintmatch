@@ -215,6 +215,13 @@ class _HomeScreenState extends State<HomeScreen> {
                     ],
                   ),
                   Row(children: [
+                    // Admin button — only for admin email
+                    if (SupabaseService().currentUser?.email == 'batchuusa@gmail.com')
+                      IconButton(
+                        icon: const Icon(Icons.admin_panel_settings_outlined,
+                            color: AppColors.accent),
+                        onPressed: () => context.push('/admin'),
+                      ),
                     // Account / logout
                     IconButton(
                       icon: const Icon(Icons.person_outline,

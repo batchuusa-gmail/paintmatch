@@ -20,6 +20,7 @@ import 'screens/painter/painter_registration_screen.dart';
 import 'screens/painter/painter_dashboard_screen.dart';
 import 'screens/painter/painter_directory_screen.dart';
 import 'screens/painter/painter_paywall_screen.dart';
+import 'screens/admin_screen.dart';
 import 'services/subscription_service.dart';
 import 'models/paint_color.dart';
 
@@ -90,6 +91,7 @@ final GoRouter _router = GoRouter(
     GoRoute(path: '/painter/dashboard', builder: (_, __) => const PainterDashboardScreen()),
     GoRoute(path: '/painter/directory', builder: (_, __) => const PainterDirectoryScreen()),
     GoRoute(path: '/painter/paywall',   builder: (_, __) => const PainterPaywallScreen()),
+    GoRoute(path: '/admin',             builder: (_, __) => const AdminScreen()),
   ],
 );
 
