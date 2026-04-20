@@ -124,12 +124,13 @@ def ai_render():
 
         client = OpenAI(api_key=api_key)
 
+        # gpt-image-1 requires a named file-like object (BytesIO needs a name attr)
+        buf.name = "room.png"
+
         response = client.images.edit(
             model="gpt-image-1",
             image=buf,
             prompt=prompt,
-            n=1,
-            size="1024x1024",
         )
 
         # gpt-image-1 returns base64 data directly
