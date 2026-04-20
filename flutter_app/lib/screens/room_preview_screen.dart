@@ -12,6 +12,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../config/app_theme.dart';
 import '../models/paint_color.dart';
+import '../models/room_dimensions.dart';
 import '../services/api_service.dart';
 import '../services/supabase_service.dart';
 import '../utils/color_ext.dart';
@@ -76,6 +77,9 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   ui.Image? _srcImage;
   Uint8List? _srcJpeg;
   Uint8List? _renderedBytes;
+
+  // Room measurements — fetched in parallel with first AI render
+  DimensionEstimate? _dimensionEstimate;
 
   // ── Precision auto-segmentation ───────────────────────────────────────────
   // Pre-computed SAM masks for every surface, loaded once on init.
@@ -172,6 +176,7 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   }
 
   /// AI render using OpenAI — called when user picks a surface from the picker.
+  /// Simultaneously fetches room dimensions (for cost analysis) on the first call.
   Future<void> _aiRender(String surface) async {
     if (_srcJpeg == null) return;
     setState(() {
@@ -180,13 +185,25 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       _renderStatus = 'Painting $surface with AI…';
     });
     try {
-      final renderedB64 = await ApiService().aiRenderSurface(
-        imageBase64: base64Encode(_srcJpeg!),
-        surface: surface,
-        colorHex: _selectedHex,
-        colorName: _selectedColorName,
-      );
-      final imgBytes = base64Decode(renderedB64);
+      // Run render + dimension analysis in parallel on first call
+      final futures = <Future>[
+        ApiService().aiRenderSurface(
+          imageBase64: base64Encode(_srcJpeg!),
+          surface: surface,
+          colorHex: _selectedHex,
+          colorName: _selectedColorName,
+        ),
+        if (_dimensionEstimate == null && widget.imageFile != null)
+          ApiService().estimateDimensions(widget.imageFile!),
+      ];
+
+      final results = await Future.wait(futures);
+      final imgBytes = base64Decode(results[0] as String);
+
+      if (_dimensionEstimate == null && results.length > 1) {
+        _dimensionEstimate = results[1] as DimensionEstimate;
+      }
+
       if (mounted) setState(() { _renderedBytes = imgBytes; _renderStatus = ''; });
     } catch (e) {
       debugPrint('[AIRender] $e');
@@ -636,6 +653,7 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                     context,
                     vendorMatches: widget.vendorMatches ?? [],
                     paletteName: _selectedColorName,
+                    estimate: _dimensionEstimate,
                   ),
                   style: OutlinedButton.styleFrom(
                     minimumSize: const Size(0, 48),
