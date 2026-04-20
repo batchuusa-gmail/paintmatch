@@ -179,6 +179,35 @@ class ApiService {
   }
 
   // -------------------------------------------------------------------------
+  // POST /api/ai-render
+  // Uses OpenAI gpt-image-1 to paint a surface — no masks needed.
+  // Returns rendered image as base64 PNG.
+  // -------------------------------------------------------------------------
+  Future<String> aiRenderSurface({
+    required String imageBase64,
+    required String surface,    // "wall" | "ceiling" | "floor" | "trim"
+    required String colorHex,   // "#2C3E50"
+    String colorName = '',
+  }) async {
+    final uri = Uri.parse('$_base/api/ai-render');
+    final response = await http.post(
+      uri,
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'image_b64':  imageBase64,
+        'surface':    surface,
+        'color_hex':  colorHex,
+        'color_name': colorName,
+      }),
+    ).timeout(const Duration(seconds: 90));
+
+    final json = jsonDecode(response.body) as Map<String, dynamic>;
+    if (json['error'] != null) throw Exception(json['error']);
+    final data = json['data'] as Map<String, dynamic>;
+    return data['rendered_b64'] as String;
+  }
+
+  // -------------------------------------------------------------------------
   // POST /match-colors
   // -------------------------------------------------------------------------
   Future<List<PaintColor>> matchColors(String hex, {int topN = 3}) async {

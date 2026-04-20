@@ -1,9 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math' as math;
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -35,197 +34,6 @@ const _surfaces = [
   _Surface('trim',    'Trim',     Icons.border_all_outlined),
 ];
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Isolate blend payload
-// ─────────────────────────────────────────────────────────────────────────────
-class _BlendParams {
-  final Uint8List srcRgba;
-  final int srcW, srcH;
-  final Uint8List maskRgba;
-  final int maskW, maskH;
-  final int tR, tG, tB;
-  const _BlendParams({
-    required this.srcRgba, required this.srcW, required this.srcH,
-    required this.maskRgba, required this.maskW, required this.maskH,
-    required this.tR, required this.tG, required this.tB,
-  });
-}
-
-// RGB ↔ HSL helpers (all values 0.0–1.0)
-List<double> _rgbToHsl(double r, double g, double b) {
-  final max = [r, g, b].reduce((a, x) => x > a ? x : a);
-  final min = [r, g, b].reduce((a, x) => x < a ? x : a);
-  final l = (max + min) / 2.0;
-  if (max == min) return [0.0, 0.0, l];
-  final d = max - min;
-  final s = l > 0.5 ? d / (2.0 - max - min) : d / (max + min);
-  double h;
-  if (max == r)      h = (g - b) / d + (g < b ? 6 : 0);
-  else if (max == g) h = (b - r) / d + 2;
-  else               h = (r - g) / d + 4;
-  return [h / 6.0, s, l];
-}
-
-double _hue2rgb(double p, double q, double t) {
-  if (t < 0) t += 1;
-  if (t > 1) t -= 1;
-  if (t < 1/6) return p + (q - p) * 6 * t;
-  if (t < 1/2) return q;
-  if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
-  return p;
-}
-
-List<double> _hslToRgb(double h, double s, double l) {
-  if (s == 0) return [l, l, l];
-  final q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-  final p = 2 * l - q;
-  return [_hue2rgb(p, q, h + 1/3), _hue2rgb(p, q, h), _hue2rgb(p, q, h - 1/3)];
-}
-
-Uint8List _blendIsolate(_BlendParams p) {
-  final src  = p.srcRgba;
-  final mask = p.maskRgba;
-  final out  = Uint8List.fromList(src);
-  final total = p.srcW * p.srcH;
-
-  final tR = p.tR / 255.0, tG = p.tG / 255.0, tB = p.tB / 255.0;
-  final targetHsl = _rgbToHsl(tR, tG, tB);
-  final tH = targetHsl[0], tS = targetHsl[1], tL = targetHsl[2];
-
-  for (int i = 0; i < total; i++) {
-    final sb = i * 4;
-    final mx = ((i % p.srcW) * p.maskW / p.srcW).round().clamp(0, p.maskW - 1);
-    final my = ((i ~/ p.srcW) * p.maskH / p.srcH).round().clamp(0, p.maskH - 1);
-    if (mask[(my * p.maskW + mx) * 4] <= 127) continue;
-
-    final r = src[sb] / 255.0, g = src[sb+1] / 255.0, b = src[sb+2] / 255.0;
-    final srcHsl = _rgbToHsl(r, g, b);
-    final srcL   = srcHsl[2];
-
-    // Use target H + S (full color swap)
-    // Lightness: 40% original (keeps shadows/texture) + 60% target (shows true color)
-    // This makes dark colors look dark and bright colors look bright
-    final blendL = srcL * 0.40 + tL * 0.60;
-
-    final recolored = _hslToRgb(tH, tS, blendL);
-    out[sb]   = (recolored[0] * 255).round().clamp(0, 255);
-    out[sb+1] = (recolored[1] * 255).round().clamp(0, 255);
-    out[sb+2] = (recolored[2] * 255).round().clamp(0, 255);
-  }
-  return out;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// On-device BFS segmentation (fast mode — no network, <200ms)
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _BfsParams {
-  final Uint8List srcRgba;
-  final int srcW, srcH;
-  final int seedX, seedY;
-  final bool trimMode; // tight tolerance for thin trim strips
-  const _BfsParams({
-    required this.srcRgba, required this.srcW, required this.srcH,
-    required this.seedX,   required this.seedY,
-    this.trimMode = false,
-  });
-}
-
-/// Edge-aware flood-fill from (seedX, seedY).
-/// Two-gate check per step:
-///   1. DRIFT gate  — pixel vs seed color (prevents wandering far from seed hue)
-///   2. EDGE gate   — neighbor vs current pixel color (stops at geometric edges/corners)
-/// Together these confine the fill to one surface even when wall and trim share similar hues.
-Uint8List _bfsIsolate(_BfsParams p) {
-  final src   = p.srcRgba;
-  final W     = p.srcW;
-  final H     = p.srcH;
-  final total = W * H;
-
-  // ── 1. Sample seed color ─────────────────────────────────────────────────
-  final si    = (p.seedY * W + p.seedX) * 4;
-  final seedR = src[si].toDouble();
-  final seedG = src[si + 1].toDouble();
-  final seedB = src[si + 2].toDouble();
-
-  // ── 2. Adaptive base tolerance from 15×15 neighbourhood ──────────────────
-  double variance = 0; int count = 0;
-  for (int dy = -7; dy <= 7; dy++) {
-    for (int dx = -7; dx <= 7; dx++) {
-      final nx = (p.seedX + dx).clamp(0, W - 1);
-      final ny = (p.seedY + dy).clamp(0, H - 1);
-      final pi = (ny * W + nx) * 4;
-      final dr = src[pi]     - seedR;
-      final dg = src[pi + 1] - seedG;
-      final db = src[pi + 2] - seedB;
-      variance += dr*dr + dg*dg + db*db;
-      count++;
-    }
-  }
-  variance /= (count * 3);
-
-  // Drift tolerance: how far a pixel can stray in colour from the seed
-  //   trim: very tight  (6–14) — baseboards/door frames are narrow, same-colour walls adjacent
-  //   wall: adaptive (20–52) based on texture variance
-  final double driftMax = p.trimMode ? 14.0 : 52.0;
-  final double driftMin = p.trimMode ?  6.0 : 20.0;
-  final double driftTol = (driftMin + math.sqrt(variance)).clamp(driftMin, driftMax);
-  final double driftSq  = driftTol * driftTol * 3;
-
-  // Edge tolerance: max colour step allowed between two adjacent pixels when walking the frontier.
-  // A hard edge (corner, shadow, surface boundary) produces a large step → stop there.
-  //   trim: very tight (8) — stop at the slightest shadow/corner
-  //   wall: moderate  (22) — allow gentle gradients
-  final double edgeSq = p.trimMode ? (8.0 * 8.0 * 3) : (22.0 * 22.0 * 3);
-
-  // ── 3. BFS ────────────────────────────────────────────────────────────────
-  final mask    = Uint8List(total * 4);
-  final visited = Uint8List(total);
-  final queue   = Int32List(total);
-  int   qHead = 0, qTail = 0;
-
-  final seedPx = p.seedY * W + p.seedX;
-  visited[seedPx] = 1;
-  queue[qTail++]  = seedPx;
-
-  while (qHead < qTail) {
-    final px = queue[qHead++];
-    final pi = px * 4;
-
-    // Gate 1 — drift: skip pixels too far in colour from seed
-    final dr = src[pi]     - seedR;
-    final dg = src[pi + 1] - seedG;
-    final db = src[pi + 2] - seedB;
-    if (dr*dr + dg*dg + db*db > driftSq) continue;
-
-    // Mark as painted
-    mask[pi] = mask[pi + 1] = mask[pi + 2] = mask[pi + 3] = 255;
-
-    final x  = px % W;
-    final y  = px ~/ W;
-    final pR = src[pi].toDouble();
-    final pG = src[pi + 1].toDouble();
-    final pB = src[pi + 2].toDouble();
-
-    // 4-connected neighbours — Gate 2 (edge): reject if adjacent step too large
-    void tryNeighbor(int n) {
-      if (visited[n] != 0) return;
-      visited[n] = 1;
-      final ni = n * 4;
-      final er = src[ni].toDouble()     - pR;
-      final eg = src[ni + 1].toDouble() - pG;
-      final eb = src[ni + 2].toDouble() - pB;
-      if (er*er + eg*eg + eb*eb <= edgeSq) queue[qTail++] = n;
-    }
-
-    if (x > 0)     tryNeighbor(px - 1);
-    if (x < W - 1) tryNeighbor(px + 1);
-    if (y > 0)     tryNeighbor(px - W);
-    if (y < H - 1) tryNeighbor(px + W);
-  }
-
-  return mask;
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Widget
@@ -260,24 +68,14 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   String _renderStatus = '';
   String _environment = 'interior';
   String _selectedSurface = 'wall';
-  // Always precision (SAM2) — BFS removed
-  final bool _precisionMode = true;
 
   late String _selectedHex;
   late String _selectedColorName;
 
-  // Tap seed — normalized 0–1 coords within the displayed image
-  double? _seedX, _seedY;
-
   // Image data
   ui.Image? _srcImage;
-  Uint8List? _srcRgba;
   Uint8List? _srcJpeg;
   Uint8List? _renderedBytes;
-
-  // Cached mask — reuse on color change, only re-fetch on new tap
-  Uint8List? _cachedMaskRgba;
-  int? _cachedMaskW, _cachedMaskH;
 
   // ── Precision auto-segmentation ───────────────────────────────────────────
   // Pre-computed SAM masks for every surface, loaded once on init.
@@ -312,9 +110,7 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       final codec = await ui.instantiateImageCodec(rawBytes);
       final frame = await codec.getNextFrame();
       final img = frame.image;
-      final bd = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
       _srcImage = img;
-      _srcRgba = bd!.buffer.asUint8List();
     } catch (e) {
       if (mounted) setState(() { _renderStatus = 'Failed to load: $e'; });
     } finally {
@@ -368,147 +164,46 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
           setState(() {
             _selectedSurface = surface;
             _renderedBytes = null;
-            _seedX = null;
-            _seedY = null;
-            _cachedMaskRgba = null;
           });
-          _applyPrecomputedMask(surface);
+          _aiRender(surface);
         },
       ),
     );
   }
 
-  /// Apply a pre-computed surface mask with the current selected color.
-  Future<void> _applyPrecomputedMask(String surface) async {
-    final maskRgba = _surfaceMasks[surface];
-    final maskW = _surfaceMaskW[surface];
-    final maskH = _surfaceMaskH[surface];
-    if (maskRgba == null || maskW == null || maskH == null) return;
-    if (_srcImage == null || _srcRgba == null) return;
-    if (_rendering) return;
-
-    setState(() { _rendering = true; _renderStatus = 'Painting $surface…'; });
-    try {
-      final target = HexColor.fromHex(_selectedHex);
-      final out = await compute(_blendIsolate, _BlendParams(
-        srcRgba: _srcRgba!, srcW: _srcImage!.width, srcH: _srcImage!.height,
-        maskRgba: maskRgba, maskW: maskW, maskH: maskH,
-        tR: (target.r * 255).round(),
-        tG: (target.g * 255).round(),
-        tB: (target.b * 255).round(),
-      ));
-      final c = Completer<ui.Image>();
-      ui.decodeImageFromPixels(
-          out, _srcImage!.width, _srcImage!.height, ui.PixelFormat.rgba8888, c.complete);
-      final rendered = await c.future;
-      final renderBd = await rendered.toByteData(format: ui.ImageByteFormat.png);
-      if (mounted) setState(() { _renderedBytes = renderBd!.buffer.asUint8List(); _renderStatus = ''; });
-    } catch (e, s) {
-      debugPrint('[ApplyMask] $e\n$s');
-    } finally {
-      if (mounted) setState(() => _rendering = false);
-    }
-  }
-
-  Future<void> _paint({double? seedX, double? seedY}) async {
-    if (_srcImage == null || _srcRgba == null) return;
-
-    final isNewTap = seedX != null || seedY != null;
-    if (seedX != null) _seedX = seedX;
-    if (seedY != null) _seedY = seedY;
-    if (_seedX == null || _seedY == null) return;
-
+  /// AI render using OpenAI — called when user picks a surface from the picker.
+  Future<void> _aiRender(String surface) async {
+    if (_srcJpeg == null) return;
     setState(() {
       _rendering = true;
       _renderedBytes = null;
-      _renderStatus = 'Analyzing surface…';
+      _renderStatus = 'Painting $surface with AI…';
     });
-
     try {
-      if (isNewTap || _cachedMaskRgba == null) {
-        // SAM2 via backend — only precision path
-        if (_srcJpeg == null) return;
-        final result = await ApiService().segmentWall(
-          imageBase64: base64Encode(_srcJpeg!),
-          surface: _selectedSurface,
-          seedX: _seedX,
-          seedY: _seedY,
-        );
-        final maskBytes = base64Decode(result['mask'] as String);
-        final coverage  = (result['coverage'] as double?) ?? 0.0;
-
-        if (coverage < 0.03 && mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: const Text(
-              'Could not isolate that surface.\nTap directly on the wall/ceiling/floor area.'),
-            backgroundColor: Colors.orange.shade800,
-            duration: const Duration(seconds: 4),
-          ));
-          setState(() { _rendering = false; _renderStatus = ''; });
-          return;
-        }
-
-        final maskCodec = await ui.instantiateImageCodec(maskBytes);
-        final maskFrame = await maskCodec.getNextFrame();
-        final maskImg   = maskFrame.image;
-        final maskBd    = await maskImg.toByteData(format: ui.ImageByteFormat.rawRgba);
-        _cachedMaskRgba = maskBd!.buffer.asUint8List();
-        _cachedMaskW    = maskImg.width;
-        _cachedMaskH    = maskImg.height;
+      final renderedB64 = await ApiService().aiRenderSurface(
+        imageBase64: base64Encode(_srcJpeg!),
+        surface: surface,
+        colorHex: _selectedHex,
+        colorName: _selectedColorName,
+      );
+      final imgBytes = base64Decode(renderedB64);
+      if (mounted) setState(() { _renderedBytes = imgBytes; _renderStatus = ''; });
+    } catch (e) {
+      debugPrint('[AIRender] $e');
+      if (mounted) {
+        setState(() { _rendering = false; _renderStatus = ''; });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Render failed: $e'),
+          backgroundColor: Colors.orange.shade800,
+        ));
       }
-
-      setState(() => _renderStatus = 'Applying color…');
-      final target = HexColor.fromHex(_selectedHex);
-      final out = await compute(_blendIsolate, _BlendParams(
-        srcRgba: _srcRgba!, srcW: _srcImage!.width, srcH: _srcImage!.height,
-        maskRgba: _cachedMaskRgba!, maskW: _cachedMaskW!, maskH: _cachedMaskH!,
-        tR: (target.r * 255).round(),
-        tG: (target.g * 255).round(),
-        tB: (target.b * 255).round(),
-      ));
-
-      final c = Completer<ui.Image>();
-      ui.decodeImageFromPixels(
-          out, _srcImage!.width, _srcImage!.height, ui.PixelFormat.rgba8888, c.complete);
-      final rendered = await c.future;
-      final renderBd = await rendered.toByteData(format: ui.ImageByteFormat.png);
-      if (mounted) setState(() => _renderedBytes = renderBd!.buffer.asUint8List());
-    } catch (e, s) {
-      debugPrint('[Render] $e\n$s');
-      if (mounted) setState(() => _renderStatus = 'Failed: $e');
     } finally {
       if (mounted) setState(() => _rendering = false);
     }
   }
 
   void _onImageTap(TapUpDetails details, BoxConstraints box) {
-    // If a precomputed SAM2 mask already exists for the selected surface,
-    // use it directly — no need to run BFS from the tap point.
-    if (_surfaceMasks.containsKey(_selectedSurface)) {
-      _applyPrecomputedMask(_selectedSurface);
-      return;
-    }
-
-    // BoxFit.cover crops the image — correct tap coords to image space.
-    double dx, dy;
-    if (_srcImage != null) {
-      final imgW = _srcImage!.width.toDouble();
-      final imgH = _srcImage!.height.toDouble();
-      final boxW = box.maxWidth;
-      final boxH = box.maxHeight;
-      final scale = math.max(boxW / imgW, boxH / imgH);
-      final scaledW = imgW * scale;
-      final scaledH = imgH * scale;
-      final cropX = (scaledW - boxW) / 2;
-      final cropY = (scaledH - boxH) / 2;
-      dx = ((details.localPosition.dx + cropX) / scaledW).clamp(0.0, 1.0);
-      dy = ((details.localPosition.dy + cropY) / scaledH).clamp(0.0, 1.0);
-    } else {
-      dx = (details.localPosition.dx / box.maxWidth).clamp(0.0, 1.0);
-      dy = (details.localPosition.dy / box.maxHeight).clamp(0.0, 1.0);
-    }
-
-    _paint(seedX: dx, seedY: dy);
+    _aiRender(_selectedSurface);
   }
 
   void _openColorPicker() async {
@@ -527,12 +222,7 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
         _selectedColorName = result['name']!;
         _renderedBytes = null;
       });
-      // Use precomputed mask if available, otherwise re-tap seed
-      if (_surfaceMasks.containsKey(_selectedSurface)) {
-        _applyPrecomputedMask(_selectedSurface);
-      } else if (_seedX != null) {
-        _paint(); // re-paint with same seed, new color
-      }
+      _aiRender(_selectedSurface);
     }
   }
 
@@ -653,9 +343,6 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                           child: GestureDetector(
                             onTap: () => setState(() {
                               _renderedBytes = null;
-                              _seedX = null;
-                              _seedY = null;
-                              _cachedMaskRgba = null;
                             }),
                             child: Container(
                               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
@@ -829,14 +516,8 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                           setState(() {
                             _selectedSurface = s.id;
                             _renderedBytes = null;
-                            _seedX = null;
-                            _seedY = null;
-                            _cachedMaskRgba = null;
                           });
-                          // Instant paint when pre-computed mask available
-                          if (hasMask) {
-                            _applyPrecomputedMask(s.id);
-                          }
+                          _aiRender(s.id);
                         },
                         child: AnimatedContainer(
                           duration: const Duration(milliseconds: 150),
