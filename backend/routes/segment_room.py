@@ -1,17 +1,18 @@
 """
 POST /api/segment-room
-Room surface segmentation — hybrid approach for maximum accuracy.
+Room surface segmentation — hard exclusive zones, no surface bleeding.
 
-Pipeline:
-  1. Claude Vision: one call, identifies wall seeds and obstacles (~5s).
-  2. Ceiling + Floor: pure geometric + color-dominance (no SAM2, instant).
-  3. Wall: SAM2 interactive mode with negative seeds on ceiling/floor regions.
-  4. Trim: SAM2 with tight geometric clip to bottom 20%.
+Zone boundaries (% of image height):
+  ceiling → 0% – 22%    (hard ceiling, never overlaps wall)
+  wall    → 22% – 80%   (SAM2 result clipped to this band)
+  floor   → 80% – 100%  (hard floor, never overlaps wall)
+  trim    → 76% – 100%  (baseboard strip, slight overlap with floor ok)
 
-Advantages over pure SAM2:
-  - Ceiling/floor never bleed into walls (geometric zones are hard boundaries).
-  - Wall SAM2 uses negative points so it avoids ceiling/floor even on same-color rooms.
-  - Total latency: ~15-25s (vs 40s before — 2 fewer SAM2 calls).
+Ceiling + floor use pure color-zone geometry (no SAM2 = fast + reliable).
+Wall uses SAM2 auto-seg clipped to the wall band (22–80%).
+Trim uses SAM2 clipped to bottom 24%.
+
+Total latency: ~15-20s (ceiling/floor instant, 1-2 SAM2 calls for wall/trim).
 """
 import base64
 import io
@@ -25,11 +26,28 @@ import numpy as np
 from flask import Blueprint, jsonify, request
 from PIL import Image, ImageOps
 
-from routes.segment_wall import _sam_segment, _segment_auto, _clean, _resize_to, _upload_to_replicate
+from routes.segment_wall import _sam_segment, _segment_auto, _clean
 
 segment_room_bp = Blueprint("segment_room", __name__)
 
 _anthropic_client = None
+
+# Hard zone boundaries (fraction of image height)
+_ZONE = {
+    "ceiling": (0.00, 0.22),   # top 22%
+    "wall":    (0.22, 0.80),   # middle 58%
+    "floor":   (0.80, 1.00),   # bottom 20%
+    "trim":    (0.76, 1.00),   # bottom 24% (baseboards)
+}
+
+_COVERAGE_BOUNDS = {
+    "wall":    (0.04, 0.70),
+    "ceiling": (0.02, 0.50),
+    "floor":   (0.02, 0.50),
+    "trim":    (0.002, 0.08),
+}
+
+_SAM_TIMEOUT_S = 30
 
 
 def _get_client() -> anthropic.Anthropic:
@@ -39,257 +57,149 @@ def _get_client() -> anthropic.Anthropic:
     return _anthropic_client
 
 
-# Only ask Claude for wall seeds — ceiling/floor handled geometrically.
-SEED_PROMPT = """Analyze this room photo and return seed coordinates for wall segmentation.
+SEED_PROMPT = """Analyze this room photo and return seed coordinates for wall and trim segmentation.
 
-Step 1 — Map obstacles: note every door, window, large furniture piece. Record approximate center (cx, cy).
-
-Step 2 — Place 3 wall seed points in obstacle-free zones.
-If a door splits the wall: place one seed LEFT and one RIGHT of the door.
-Seeds must be on flat, unobstructed wall surface (not furniture, not door panels, not trim).
+Map obstacles (doors, windows, furniture) first, then place seeds for wall only.
 
 Return ONLY valid JSON:
 {
-  "obstacles": [
-    {"type": "door", "cx": 0.40, "cy": 0.55, "w": 0.15, "h": 0.50}
-  ],
+  "obstacles": [{"type": "door", "cx": 0.40, "cy": 0.55}],
   "wall": [[x1,y1], [x2,y2], [x3,y3]],
   "trim": [[x1,y1], [x2,y2]]
 }
 
-Placement rules:
-- wall seeds: y between 0.25–0.72, stay 0.12+ away from any obstacle cx
-- trim seeds: y >= 0.88, on baseboard strip; omit key if no distinct trim visible
-- Omit "trim" key entirely if no baseboard/molding is clearly visible"""
+Rules:
+- wall seeds: y between 0.30 and 0.70 (middle of wall, NOT near ceiling or floor)
+- Stay 0.12 away from door/window center x
+- trim: y >= 0.88 on baseboard only; omit key entirely if no clear trim
+- NO ceiling or floor seeds — those are handled separately"""
 
 
-# Coverage bounds per surface
-_COVERAGE_BOUNDS = {
-    "wall":    (0.04, 0.75),
-    "ceiling": (0.03, 0.55),
-    "floor":   (0.03, 0.55),
-    "trim":    (0.003, 0.10),
-}
+# ── Hard zone clip ─────────────────────────────────────────────────────────────
 
-_SAM_TIMEOUT_S = 30   # per wall/trim surface
-_SAM2_VERSION  = "fe97b453a6455861e3bac769b441ca1f1086110da7466dbb65cf1eecfd60dc83"
-_WORK_SIZE     = 1024
+def _zone_clip(arr: np.ndarray, surface: str) -> np.ndarray:
+    """Zero out everything outside this surface's exclusive zone."""
+    h = arr.shape[0]
+    y0, y1 = _ZONE[surface]
+    out = arr.copy()
+    out[:int(h * y0), :] = 0
+    out[int(h * y1):, :] = 0
+    return out
 
 
-# ── Geometric mask (ceiling / floor) ─────────────────────────────────────────
+# ── Ceiling / floor: color-zone geometry (no SAM2) ────────────────────────────
 
-def _geometric_mask(pil: Image.Image, surface: str) -> Image.Image | None:
+def _color_zone_mask(pil: Image.Image, surface: str) -> Image.Image | None:
     """
-    Fast, reliable mask for ceiling and floor using geometric zones + color dominance.
-    No SAM2 needed — these surfaces occupy predictable image regions.
+    Build a mask using only pixels inside the exclusive zone that match
+    the dominant color found in that zone.
 
-    ceiling → top 26% of image
-    floor   → bottom 24% of image
+    ceiling → top 22%, dominant bright color
+    floor   → bottom 20%, dominant dark/neutral color
+
+    No pixels outside the zone are ever included.
     """
-    from skimage.segmentation import slic
-    from skimage.util import img_as_float
     from skimage.color import rgb2lab
 
+    # Work at 512px for speed
     w, h = pil.size
     scale = 512 / max(w, h)
     small = pil.resize((int(w * scale), int(h * scale)), Image.BILINEAR)
-    arr   = img_as_float(np.array(small))
-    segs  = slic(arr, n_segments=200, compactness=10, sigma=1,
-                 start_label=0, channel_axis=2)
-    sh, sw = segs.shape
+    arr   = np.array(small).astype(np.float32) / 255.0  # H×W×3, float 0-1
+    sh, sw = arr.shape[:2]
 
-    if surface == "ceiling":
-        r0, r1 = 0, int(sh * 0.26)
-    else:  # floor
-        r0, r1 = int(sh * 0.76), sh
+    y0, y1 = _ZONE[surface]
+    r0, r1 = int(sh * y0), int(sh * y1)
+    zone   = arr[r0:r1, :, :]  # the exclusive zone strip
 
-    roi_labels = segs[r0:r1, :]
-    if roi_labels.size == 0:
+    if zone.size == 0:
         return None
 
-    # Find the dominant SLIC label in the geometric zone
-    dominant = int(np.bincount(roi_labels.flatten()).argmax())
-    dom_lab = rgb2lab(
-        arr[segs == dominant].mean(axis=0).reshape(1, 1, 3)
-    ).reshape(3)
+    # Find the single most-common pixel color in the zone
+    # Use 8-bit quantized colors for histogram
+    zone_u8 = (zone * 255).astype(np.uint8)
+    zone_flat = zone_u8.reshape(-1, 3)
+    # Quantize to 16 levels per channel to group similar colors
+    q = (zone_flat // 16).astype(np.int32)
+    keys = q[:, 0] * 256 + q[:, 1] * 16 + q[:, 2]
+    dominant_key = int(np.bincount(keys).argmax())
+    dom_r = ((dominant_key // 256) * 16 + 8) / 255.0
+    dom_g = (((dominant_key % 256) // 16) * 16 + 8) / 255.0
+    dom_b = ((dominant_key % 16) * 16 + 8) / 255.0
+    dom_lab = rgb2lab(np.array([[[dom_r, dom_g, dom_b]]]).astype(np.float64)).reshape(3)
 
-    # Mark all labels with similar color — then clip to zone
+    # Mark all pixels in the zone with similar LAB color
+    zone_lab = rgb2lab(zone.astype(np.float64)).reshape(-1, 3)
+    diffs    = np.linalg.norm(zone_lab - dom_lab, axis=1)
+    match    = (diffs < 20).reshape(r1 - r0, sw)
+
     out = np.zeros((sh, sw), dtype=np.uint8)
-    for lbl in range(int(segs.max()) + 1):
-        px = arr[segs == lbl]
-        if not len(px):
-            continue
-        lab = rgb2lab(px.mean(axis=0).reshape(1, 1, 3)).reshape(3)
-        if np.linalg.norm(lab - dom_lab) < 16:
-            out[segs == lbl] = 255
+    out[r0:r1, :] = (match * 255).astype(np.uint8)
 
-    # Hard geometric clip — ceiling/floor cannot go outside their zones
-    if surface == "ceiling":
-        out[r1:, :] = 0
-    else:
-        out[:r0, :] = 0
-
-    result = Image.fromarray(out, "L").resize(pil.size, Image.NEAREST)
-    return result
+    return Image.fromarray(out, "L").resize(pil.size, Image.NEAREST)
 
 
-# ── SAM2 interactive mode (wall / trim) ──────────────────────────────────────
-
-def _sam_segment_interactive(
-    pil: Image.Image,
-    seed_x: float,
-    seed_y: float,
-    negative_seeds: list | None = None,
-) -> Image.Image:
-    """
-    SAM2 interactive point mode.
-    Positive seed = surface we want.
-    Negative seeds = surfaces to AVOID (ceiling/floor regions for wall segmentation).
-
-    Falls back to SAM2 auto-segmentation if interactive mode fails.
-    """
-    import replicate
-    import requests as req
-
-    token = os.environ.get("REPLICATE_API_TOKEN") or os.environ.get("REPLICATE_API_KEY")
-    if not token:
-        raise RuntimeError("REPLICATE_API_TOKEN not set")
-
-    work      = _resize_to(pil, _WORK_SIZE)
-    image_url = _upload_to_replicate(work, token)
-    ww, wh    = work.size
-    client    = replicate.Client(api_token=token)
-
-    # Build point arrays (pixel coordinates)
-    points = [[int(seed_x * ww), int(seed_y * wh)]]
-    labels = [1]  # positive
-
-    if negative_seeds:
-        for nx, ny in negative_seeds[:4]:
-            points.append([int(nx * ww), int(ny * wh)])
-            labels.append(0)  # negative
-
-    print(f"[sam-interactive] pos=({seed_x:.2f},{seed_y:.2f}) neg_count={len(negative_seeds or [])}")
-
-    try:
-        output = client.run(
-            f"meta/sam-2:{_SAM2_VERSION}",
-            input={
-                "image":         image_url,
-                "input_points":  points,
-                "input_labels":  labels,
-                "use_m2m":       True,
-            },
-        )
-
-        # Interactive mode returns "masks" (list of URLs) + "scores"
-        masks = output.get("masks", [])
-        if not masks:
-            raise RuntimeError("SAM2 interactive returned no masks")
-
-        scores  = output.get("scores", [1.0] * len(masks))
-        best_i  = int(np.argmax(scores)) if scores else 0
-        best_url = masks[best_i % len(masks)]
-
-        resp = req.get(str(best_url), timeout=30)
-        resp.raise_for_status()
-        m = Image.open(io.BytesIO(resp.content)).convert("L")
-        if m.size != pil.size:
-            m = m.resize(pil.size, Image.NEAREST)
-        return m
-
-    except Exception as e:
-        print(f"[sam-interactive] failed ({e}), falling back to auto-seg")
-        # Fall back to auto-segmentation
-        return _sam_segment(pil, seed_x, seed_y)
-
-
-# ── Geometric clip (hard boundary after SAM2) ─────────────────────────────────
-
-def _geometric_clip(mask: Image.Image, surface: str) -> Image.Image:
-    """
-    Hard-clip SAM2 output to the physical region of each surface.
-    Applied after SAM2 as a safety net — prevents any residual bleed.
-    """
-    arr = np.array(mask).copy()
-    h   = arr.shape[0]
-
-    if surface == "ceiling":
-        arr[int(h * 0.30):, :] = 0
-    elif surface == "floor":
-        arr[:int(h * 0.70), :] = 0
-    elif surface == "wall":
-        arr[:int(h * 0.10), :] = 0   # remove ceiling band
-        arr[int(h * 0.90):, :] = 0   # remove floor band
-    elif surface == "trim":
-        arr[:int(h * 0.76), :] = 0   # baseboard lives near floor
-
-    return Image.fromarray(arr, "L")
-
-
-# ── Per-surface segmentation ──────────────────────────────────────────────────
+# ── Per-surface segmentation ───────────────────────────────────────────────────
 
 def _segment_surface(pil: Image.Image, surface: str, seeds: list) -> tuple[str, str | None]:
-    """
-    Dispatch to the right strategy per surface:
-      ceiling/floor → geometric mask (fast, no SAM2)
-      wall          → SAM2 interactive with negative seeds on ceiling + floor regions
-      trim          → SAM2 auto with tight geometric clip
-    """
-    cov_min, cov_max = _COVERAGE_BOUNDS.get(surface, (0.04, 0.75))
+    cov_min, cov_max = _COVERAGE_BOUNDS.get(surface, (0.04, 0.70))
 
-    # ── Ceiling / Floor: geometric only ──────────────────────────────────────
+    # ── Ceiling / Floor: color-zone only, zero SAM2 ──────────────────────────
     if surface in ("ceiling", "floor"):
-        print(f"[seg-room] {surface}: geometric zone (no SAM2)")
+        print(f"[seg-room] {surface}: color-zone (no SAM2)")
         try:
-            mask = _geometric_mask(pil, surface)
+            mask = _color_zone_mask(pil, surface)
             if mask is None:
                 return surface, None
             arr      = np.array(mask)
             coverage = float((arr > 127).sum()) / arr.size
-            print(f"[seg-room] {surface} geometric coverage={coverage:.1%}")
+            print(f"[seg-room] {surface} coverage={coverage:.1%}")
             if coverage < cov_min:
-                print(f"[seg-room] {surface} coverage too low, skipping")
-                return surface, None
-            # Cap coverage — clip if > max (prevents capturing everything)
-            if coverage > cov_max:
-                mask = _geometric_clip(mask, surface)
+                # Fallback: fill the entire zone solid
+                h, w = arr.shape
+                y0, y1 = _ZONE[surface]
+                arr[:] = 0
+                arr[int(h * y0):int(h * y1), :] = 255
+                mask = Image.fromarray(arr, "L")
+                coverage = float((arr > 127).sum()) / arr.size
+                print(f"[seg-room] {surface} fallback solid zone coverage={coverage:.1%}")
             cleaned = _clean(mask)
             buf = io.BytesIO()
             cleaned.save(buf, format="PNG")
             return surface, base64.b64encode(buf.getvalue()).decode()
         except Exception as e:
-            print(f"[seg-room] {surface} geometric failed: {e}")
+            print(f"[seg-room] {surface} color-zone failed: {e}")
             return surface, None
 
-    # ── Wall: SAM2 interactive with negative seeds ────────────────────────────
+    # ── Wall: SAM2 → hard-clip to wall zone (22%–80%) ────────────────────────
     if surface == "wall":
-        # Negative seeds: top band (ceiling) + bottom band (floor)
-        neg_seeds = [
-            (0.25, 0.05), (0.75, 0.05),   # ceiling corners
-            (0.25, 0.94), (0.75, 0.94),   # floor corners
-        ]
         best_mask     = None
         best_coverage = 0.0
 
         for seed in seeds[:3]:
             sx, sy = float(seed[0]), float(seed[1])
+            # Force seed y into wall zone (never in ceiling/floor band)
+            sy = max(0.28, min(0.72, sy))
             try:
-                raw     = _sam_segment_interactive(pil, sx, sy, neg_seeds)
-                clipped = _geometric_clip(raw, "wall")
-                arr     = np.array(clipped)
+                raw = _sam_segment(pil, sx, sy)
+                # Hard clip: wall cannot go above 22% or below 80%
+                arr     = np.array(raw)
+                arr     = _zone_clip(arr, "wall")
+                clipped = Image.fromarray(arr, "L")
                 coverage = float((arr > 127).sum()) / arr.size
-                print(f"[seg-room] wall seed ({sx:.2f},{sy:.2f}) → {coverage:.1%}")
+                print(f"[seg-room] wall seed ({sx:.2f},{sy:.2f}) → {coverage:.1%} after zone clip")
                 if cov_min <= coverage <= cov_max and coverage > best_coverage:
                     best_mask     = clipped
                     best_coverage = coverage
             except Exception as e:
-                print(f"[seg-room] wall SAM failed for seed {seed}: {e}")
+                print(f"[seg-room] wall SAM failed seed {seed}: {e}")
 
         if best_mask is None:
-            print(f"[seg-room] wall: no SAM mask, using geometric fallback")
+            print(f"[seg-room] wall: SAM failed, geometric fallback")
             try:
-                best_mask = _geometric_clip(_segment_auto(pil, "wall"), "wall")
+                raw  = _segment_auto(pil, "wall")
+                arr  = _zone_clip(np.array(raw), "wall")
+                best_mask = Image.fromarray(arr, "L")
             except Exception as e:
                 print(f"[seg-room] wall geometric fallback failed: {e}")
                 return surface, None
@@ -303,24 +213,25 @@ def _segment_surface(pil: Image.Image, surface: str, seeds: list) -> tuple[str, 
             print(f"[seg-room] wall encode failed: {e}")
             return surface, None
 
-    # ── Trim: SAM2 auto + tight geometric clip ────────────────────────────────
+    # ── Trim: SAM2 → hard-clip to trim zone (76%–100%) ───────────────────────
     if surface == "trim":
         best_mask     = None
         best_coverage = 0.0
 
         for seed in seeds[:3]:
             sx, sy = float(seed[0]), float(seed[1])
+            sy = max(0.80, min(0.96, sy))   # force into trim zone
             try:
-                raw     = _sam_segment(pil, sx, sy)
-                clipped = _geometric_clip(raw, "trim")
-                arr     = np.array(clipped)
+                raw      = _sam_segment(pil, sx, sy)
+                arr      = _zone_clip(np.array(raw), "trim")
+                clipped  = Image.fromarray(arr, "L")
                 coverage = float((arr > 127).sum()) / arr.size
                 print(f"[seg-room] trim seed ({sx:.2f},{sy:.2f}) → {coverage:.1%}")
                 if cov_min <= coverage <= cov_max and coverage > best_coverage:
                     best_mask     = clipped
                     best_coverage = coverage
             except Exception as e:
-                print(f"[seg-room] trim SAM failed for seed {seed}: {e}")
+                print(f"[seg-room] trim SAM failed seed {seed}: {e}")
 
         if best_mask is None:
             print(f"[seg-room] trim: no valid mask, skipping")
@@ -359,60 +270,59 @@ def segment_room():
         except Exception as e:
             return jsonify({"error": f"Image decode failed: {e}"}), 400
 
-        # ── Claude Vision: wall seeds + obstacles ─────────────────────────────
+        # ── Claude Vision: wall seeds only ────────────────────────────────────
         seeds_by_surface: dict = {}
         try:
             client   = _get_client()
             response = client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=500,
+                max_tokens=400,
                 messages=[{
                     "role": "user",
                     "content": [
                         {
                             "type": "image",
-                            "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64},
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": image_b64,
+                            },
                         },
                         {"type": "text", "text": SEED_PROMPT},
                     ],
                 }],
             )
-            raw   = response.content[0].text.strip()
-            raw   = re.sub(r"^```[a-z]*\n?", "", raw)
-            raw   = re.sub(r"\n?```$", "", raw).strip()
-            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            raw    = response.content[0].text.strip()
+            raw    = re.sub(r"^```[a-z]*\n?", "", raw)
+            raw    = re.sub(r"\n?```$", "", raw).strip()
+            match  = re.search(r"\{.*\}", raw, re.DOTALL)
             parsed = json.loads(match.group() if match else raw)
 
             seeds_by_surface = {
                 k: v for k, v in parsed.items()
                 if k != "obstacles" and isinstance(v, list)
             }
-            obstacles = parsed.get("obstacles", [])
-            print(f"[seg-room] obstacles={len(obstacles)} seeds={list(seeds_by_surface.keys())}")
+            print(f"[seg-room] seeds={list(seeds_by_surface.keys())}")
 
         except Exception as e:
             print(f"[seg-room] Claude seed extraction failed: {e}")
 
-        # ── Ensure wall seeds exist; always run ceiling + floor geometrically ──
+        # Wall seeds fallback
         if not seeds_by_surface.get("wall"):
-            seeds_by_surface["wall"] = [[0.25, 0.45], [0.75, 0.45], [0.50, 0.40]]
+            seeds_by_surface["wall"] = [[0.25, 0.50], [0.75, 0.50], [0.50, 0.45]]
 
-        # Ceiling and floor always use geometric — pass empty seeds (unused)
+        # Ceiling and floor always go through color-zone (no seeds needed)
         seeds_by_surface["ceiling"] = []
         seeds_by_surface["floor"]   = []
 
-        # ── Parallel execution: ceiling/floor instant, wall/trim use SAM2 ──────
-        # Ceiling + floor resolve in <1s; wall/trim take ~20s.
-        # ThreadPool handles all four; ceiling/floor free up threads quickly.
+        # ── Parallel: ceiling/floor finish instantly, wall/trim take ~20s ────
         masks: dict[str, str] = {}
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = {
                 executor.submit(_segment_surface, pil, surface, seeds): surface
                 for surface, seeds in seeds_by_surface.items()
             }
-            # Total timeout: ceiling/floor + wall + trim (wall dominates)
-            total_timeout = _SAM_TIMEOUT_S * 2 + 5   # ~65s max
-            for future in as_completed(futures, timeout=total_timeout):
+            for future in as_completed(futures, timeout=_SAM_TIMEOUT_S * 2 + 10):
                 try:
                     surface_name, mask_b64 = future.result(timeout=_SAM_TIMEOUT_S)
                     if mask_b64:
