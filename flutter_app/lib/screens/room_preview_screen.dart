@@ -75,8 +75,12 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
 
   // Image data
   ui.Image? _srcImage;
-  Uint8List? _srcJpeg;
+  Uint8List? _srcJpeg;          // original
+  Uint8List? _srcJpegSmall;     // compressed for API calls
   Uint8List? _renderedBytes;
+
+  // Render cache — key: "$surface|$hex" → rendered PNG bytes
+  final Map<String, Uint8List> _renderCache = {};
 
   // Room measurements — fetched in parallel with first AI render
   DimensionEstimate? _dimensionEstimate;
@@ -111,10 +115,27 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
     try {
       final rawBytes = await widget.imageFile!.readAsBytes();
       _srcJpeg = rawBytes;
+
+      // Decode for display
       final codec = await ui.instantiateImageCodec(rawBytes);
       final frame = await codec.getNextFrame();
-      final img = frame.image;
-      _srcImage = img;
+      _srcImage = frame.image;
+
+      // Compress to max 768px for API — drastically reduces upload size
+      final smallCodec = await ui.instantiateImageCodec(
+        rawBytes, targetMaxDimension: 768);
+      final smallFrame = await smallCodec.getNextFrame();
+      final smallBd = await smallFrame.image.toByteData(
+          format: ui.ImageByteFormat.rawRgba);
+      if (smallBd != null) {
+        // Re-encode as JPEG at 80% quality
+        final smallCodec2 = await ui.instantiateImageCodec(
+          rawBytes, targetMaxDimension: 768);
+        final smallFrame2 = await smallCodec2.getNextFrame();
+        final pngBd = await smallFrame2.image.toByteData(
+            format: ui.ImageByteFormat.png);
+        _srcJpegSmall = pngBd?.buffer.asUint8List() ?? rawBytes;
+      }
     } catch (e) {
       if (mounted) setState(() { _renderStatus = 'Failed to load: $e'; });
     } finally {
@@ -179,16 +200,27 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   /// Simultaneously fetches room dimensions (for cost analysis) on the first call.
   Future<void> _aiRender(String surface) async {
     if (_srcJpeg == null) return;
+
+    // Check cache first — instant return if same surface+color was already rendered
+    final cacheKey = '$surface|$_selectedHex';
+    if (_renderCache.containsKey(cacheKey)) {
+      setState(() { _renderedBytes = _renderCache[cacheKey]; _renderStatus = ''; });
+      return;
+    }
+
     setState(() {
       _rendering = true;
       _renderedBytes = null;
-      _renderStatus = 'Painting $surface with AI…';
+      _renderStatus = 'Painting $surface…';
     });
     try {
+      // Use compressed image for faster upload; fall back to original if not ready
+      final imageBytes = _srcJpegSmall ?? _srcJpeg!;
+
       // Run render + dimension analysis in parallel on first call
       final futures = <Future>[
         ApiService().aiRenderSurface(
-          imageBase64: base64Encode(_srcJpeg!),
+          imageBase64: base64Encode(imageBytes),
           surface: surface,
           colorHex: _selectedHex,
           colorName: _selectedColorName,
@@ -203,6 +235,9 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       if (_dimensionEstimate == null && results.length > 1) {
         _dimensionEstimate = results[1] as DimensionEstimate;
       }
+
+      // Cache the result
+      _renderCache[cacheKey] = imgBytes;
 
       if (mounted) setState(() { _renderedBytes = imgBytes; _renderStatus = ''; });
     } catch (e) {

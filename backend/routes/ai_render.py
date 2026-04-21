@@ -101,8 +101,8 @@ def ai_render():
             pil = Image.open(io.BytesIO(img_bytes))
             pil = ImageOps.exif_transpose(pil).convert("RGBA")
 
-            # Fit within 1024×1024 maintaining aspect ratio
-            pil.thumbnail((1024, 1024), Image.LANCZOS)
+            # Fit within 512×512 — faster OpenAI processing, no quality loss for painting
+            pil.thumbnail((512, 512), Image.LANCZOS)
 
             buf = io.BytesIO()
             pil.save(buf, format="PNG")
