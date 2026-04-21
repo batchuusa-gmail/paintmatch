@@ -122,19 +122,21 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       _srcImage = frame.image;
 
       // Compress to max 768px for API — drastically reduces upload size
-      final smallCodec = await ui.instantiateImageCodec(
-        rawBytes, targetMaxDimension: 768);
-      final smallFrame = await smallCodec.getNextFrame();
-      final smallBd = await smallFrame.image.toByteData(
-          format: ui.ImageByteFormat.rawRgba);
-      if (smallBd != null) {
-        // Re-encode as JPEG at 80% quality
-        final smallCodec2 = await ui.instantiateImageCodec(
-          rawBytes, targetMaxDimension: 768);
-        final smallFrame2 = await smallCodec2.getNextFrame();
-        final pngBd = await smallFrame2.image.toByteData(
+      final w = _srcImage!.width;
+      final h = _srcImage!.height;
+      final maxDim = 768;
+      if (w > maxDim || h > maxDim) {
+        final scale = maxDim / (w > h ? w : h);
+        final tw = (w * scale).round();
+        final th = (h * scale).round();
+        final smallCodec = await ui.instantiateImageCodec(
+          rawBytes, targetWidth: tw, targetHeight: th);
+        final smallFrame = await smallCodec.getNextFrame();
+        final pngBd = await smallFrame.image.toByteData(
             format: ui.ImageByteFormat.png);
-        _srcJpegSmall = pngBd?.buffer.asUint8List() ?? rawBytes;
+        _srcJpegSmall = pngBd?.buffer.asUint8List();
+      } else {
+        _srcJpegSmall = rawBytes;
       }
     } catch (e) {
       if (mounted) setState(() { _renderStatus = 'Failed to load: $e'; });
