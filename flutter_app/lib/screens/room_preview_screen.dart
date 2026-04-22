@@ -79,8 +79,9 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
   Uint8List? _srcJpegSmall;     // compressed for API calls
   Uint8List? _renderedBytes;
 
-  // Render cache — key: "$surface|$hex" → rendered PNG bytes
-  final Map<String, Uint8List> _renderCache = {};
+  // All-surface renders — key: surface → rendered PNG bytes for current color
+  final Map<String, Uint8List> _surfaceRenders = {};
+  String _renderedColorHex = ''; // which color the renders are for
 
   // Room measurements — fetched in parallel with first AI render
   DimensionEstimate? _dimensionEstimate;
@@ -192,47 +193,45 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
             _selectedSurface = surface;
             _renderedBytes = null;
           });
-          _aiRender(surface);
+          _aiRenderAll();
         },
       ),
     );
   }
 
-  /// AI render using OpenAI — called when user picks a surface from the picker.
-  /// Simultaneously fetches room dimensions (for cost analysis) on the first call.
-  Future<void> _aiRender(String surface) async {
+  /// Renders ALL surfaces in one backend trip (parallel on server).
+  /// After this, switching surfaces is instant — just swap the cached image.
+  Future<void> _aiRenderAll() async {
     if (_srcJpeg == null) return;
 
-    // Check cache first — instant return if same surface+color was already rendered
-    final cacheKey = '$surface|$_selectedHex';
-    if (_renderCache.containsKey(cacheKey)) {
-      setState(() { _renderedBytes = _renderCache[cacheKey]; _renderStatus = ''; });
+    // Already have renders for this color — just show current surface
+    if (_renderedColorHex == _selectedHex && _surfaceRenders.isNotEmpty) {
+      _showSurfaceRender(_selectedSurface);
       return;
     }
 
     setState(() {
       _rendering = true;
       _renderedBytes = null;
-      _renderStatus = 'Painting $surface…';
+      _renderStatus = 'Painting all surfaces…';
     });
     try {
-      // Use compressed image for faster upload; fall back to original if not ready
       final imageBytes = _srcJpegSmall ?? _srcJpeg!;
-
-      final renderedB64 = await ApiService().aiRenderSurface(
+      final renders = await ApiService().aiRenderAll(
         imageBase64: base64Encode(imageBytes),
-        surface: surface,
         colorHex: _selectedHex,
         colorName: _selectedColorName,
       );
-      final imgBytes = base64Decode(renderedB64);
 
-      // Cache the result
-      _renderCache[cacheKey] = imgBytes;
+      _surfaceRenders.clear();
+      for (final entry in renders.entries) {
+        _surfaceRenders[entry.key] = base64Decode(entry.value);
+      }
+      _renderedColorHex = _selectedHex;
 
-      if (mounted) setState(() { _renderedBytes = imgBytes; _renderStatus = ''; });
+      _showSurfaceRender(_selectedSurface);
     } catch (e) {
-      debugPrint('[AIRender] $e');
+      debugPrint('[AIRenderAll] $e');
       if (mounted) {
         setState(() { _rendering = false; _renderStatus = ''; });
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -245,8 +244,16 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
     }
   }
 
+  /// Show already-rendered surface from cache — instant, no network call.
+  void _showSurfaceRender(String surface) {
+    final bytes = _surfaceRenders[surface];
+    if (bytes != null && mounted) {
+      setState(() { _renderedBytes = bytes; _renderStatus = ''; });
+    }
+  }
+
   void _onImageTap(TapUpDetails details, BoxConstraints box) {
-    _aiRender(_selectedSurface);
+    _aiRenderAll();
   }
 
   void _openColorPicker() async {
@@ -264,8 +271,9 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
         _selectedHex = result['hex']!;
         _selectedColorName = result['name']!;
         _renderedBytes = null;
+        _surfaceRenders.clear(); // new color = re-render all
       });
-      _aiRender(_selectedSurface);
+      _aiRenderAll();
     }
   }
 
@@ -560,7 +568,13 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                             _selectedSurface = s.id;
                             _renderedBytes = null;
                           });
-                          _aiRender(s.id);
+                          // If renders exist for current color, swap instantly
+                          if (_surfaceRenders.containsKey(s.id) &&
+                              _renderedColorHex == _selectedHex) {
+                            _showSurfaceRender(s.id);
+                          } else {
+                            _aiRenderAll();
+                          }
                         },
                         child: AnimatedContainer(
                           duration: const Duration(milliseconds: 150),

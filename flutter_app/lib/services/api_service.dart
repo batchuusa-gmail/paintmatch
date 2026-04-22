@@ -208,6 +208,34 @@ class ApiService {
   }
 
   // -------------------------------------------------------------------------
+  // POST /api/ai-render-all
+  // Renders all surfaces in one parallel backend call.
+  // Returns Map<surface, base64PNG>
+  // -------------------------------------------------------------------------
+  Future<Map<String, String>> aiRenderAll({
+    required String imageBase64,
+    required String colorHex,
+    String colorName = '',
+  }) async {
+    final uri = Uri.parse('$_base/api/ai-render-all');
+    final response = await http.post(
+      uri,
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'image_b64':  imageBase64,
+        'color_hex':  colorHex,
+        'color_name': colorName,
+      }),
+    ).timeout(const Duration(seconds: 180));
+
+    final json = jsonDecode(response.body) as Map<String, dynamic>;
+    if (json['error'] != null) throw Exception(json['error']);
+    final data = json['data'] as Map<String, dynamic>;
+    final renders = data['renders'] as Map<String, dynamic>;
+    return renders.map((k, v) => MapEntry(k, v as String));
+  }
+
+  // -------------------------------------------------------------------------
   // POST /match-colors
   // -------------------------------------------------------------------------
   Future<List<PaintColor>> matchColors(String hex, {int topN = 3}) async {

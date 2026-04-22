@@ -17,6 +17,7 @@ Response:
 import base64
 import io
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from flask import Blueprint, jsonify, request
 from PIL import Image, ImageOps
@@ -147,6 +148,95 @@ def ai_render():
                 "rendered_b64": result_b64,
                 "surface":      surface,
                 "color_hex":    color_hex,
+            },
+            "error": None,
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /api/ai-render-all
+# Renders ALL surfaces (wall, ceiling, floor, trim) in one request using
+# parallel threads. Client makes one trip, gets all 4 results back.
+# ─────────────────────────────────────────────────────────────────────────────
+@ai_render_bp.route("/api/ai-render-all", methods=["POST"])
+def ai_render_all():
+    try:
+        from openai import OpenAI
+
+        data       = request.get_json(force=True, silent=True) or {}
+        image_b64  = data.get("image_b64", "")
+        color_hex  = data.get("color_hex", "#FFFFFF")
+        color_name = data.get("color_name", "")
+        surfaces   = data.get("surfaces", list(_SURFACE_PROMPTS.keys()))
+
+        if not image_b64:
+            return jsonify({"error": "image_b64 required"}), 400
+        if "," in image_b64:
+            image_b64 = image_b64.split(",", 1)[1]
+
+        # Decode + EXIF-correct + resize once, reuse across all threads
+        try:
+            img_bytes = base64.b64decode(image_b64)
+            pil = Image.open(io.BytesIO(img_bytes))
+            pil = ImageOps.exif_transpose(pil).convert("RGBA")
+            pil.thumbnail((512, 512), Image.LANCZOS)
+            base_buf = io.BytesIO()
+            pil.save(base_buf, format="PNG")
+            png_bytes = base_buf.getvalue()   # reusable bytes
+        except Exception as e:
+            return jsonify({"error": f"Image decode failed: {e}"}), 400
+
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            return jsonify({"error": "OPENAI_API_KEY not configured"}), 500
+
+        color_desc = color_name if color_name else _hex_to_name(color_hex)
+        color_full = f"{color_desc} ({color_hex})"
+
+        def _render_one(surface: str) -> tuple[str, str]:
+            """Render a single surface; returns (surface, b64_result)."""
+            client = OpenAI(api_key=api_key)
+            prompt = _SURFACE_PROMPTS[surface].format(color=color_full)
+            buf = io.BytesIO(png_bytes)
+            buf.name = "room.png"
+            print(f"[ai-render-all] starting surface={surface}")
+            response = client.images.edit(
+                model="gpt-image-1",
+                image=buf,
+                prompt=prompt,
+            )
+            result_b64 = response.data[0].b64_json
+            if not result_b64:
+                import requests as req
+                url = response.data[0].url
+                r = req.get(url, timeout=60)
+                result_b64 = base64.b64encode(r.content).decode()
+            print(f"[ai-render-all] done surface={surface}")
+            return surface, result_b64
+
+        # Run all surfaces in parallel threads
+        results: dict[str, str] = {}
+        errors:  dict[str, str] = {}
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {pool.submit(_render_one, s): s for s in surfaces}
+            for future in as_completed(futures):
+                surface = futures[future]
+                try:
+                    s, b64 = future.result()
+                    results[s] = b64
+                except Exception as e:
+                    errors[surface] = str(e)
+
+        return jsonify({
+            "data": {
+                "renders":   results,   # {surface: b64_png}
+                "errors":    errors,    # surfaces that failed (empty on success)
+                "color_hex": color_hex,
             },
             "error": None,
         })
