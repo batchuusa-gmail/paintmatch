@@ -219,24 +219,13 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
       // Use compressed image for faster upload; fall back to original if not ready
       final imageBytes = _srcJpegSmall ?? _srcJpeg!;
 
-      // Run render + dimension analysis in parallel on first call
-      final futures = <Future>[
-        ApiService().aiRenderSurface(
-          imageBase64: base64Encode(imageBytes),
-          surface: surface,
-          colorHex: _selectedHex,
-          colorName: _selectedColorName,
-        ),
-        if (_dimensionEstimate == null && widget.imageFile != null)
-          ApiService().estimateDimensions(widget.imageFile!),
-      ];
-
-      final results = await Future.wait(futures);
-      final imgBytes = base64Decode(results[0] as String);
-
-      if (_dimensionEstimate == null && results.length > 1) {
-        _dimensionEstimate = results[1] as DimensionEstimate;
-      }
+      final renderedB64 = await ApiService().aiRenderSurface(
+        imageBase64: base64Encode(imageBytes),
+        surface: surface,
+        colorHex: _selectedHex,
+        colorName: _selectedColorName,
+      );
+      final imgBytes = base64Decode(renderedB64);
 
       // Cache the result
       _renderCache[cacheKey] = imgBytes;
@@ -686,12 +675,20 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
                       color: AppColors.accent, size: 18),
                   label: const Text('Cost',
                       style: TextStyle(color: AppColors.accent, fontSize: 14)),
-                  onPressed: () => showCostEstimateSheet(
-                    context,
-                    vendorMatches: widget.vendorMatches ?? [],
-                    paletteName: _selectedColorName,
-                    estimate: _dimensionEstimate,
-                  ),
+                  onPressed: () async {
+                    // Fetch dimensions on demand (only when user taps Cost)
+                    if (_dimensionEstimate == null && widget.imageFile != null) {
+                      _dimensionEstimate = await ApiService().estimateDimensions(widget.imageFile!);
+                    }
+                    if (context.mounted) {
+                      showCostEstimateSheet(
+                        context,
+                        vendorMatches: widget.vendorMatches ?? [],
+                        paletteName: _selectedColorName,
+                        estimate: _dimensionEstimate,
+                      );
+                    }
+                  },
                   style: OutlinedButton.styleFrom(
                     minimumSize: const Size(0, 48),
                     shape: RoundedRectangleBorder(
