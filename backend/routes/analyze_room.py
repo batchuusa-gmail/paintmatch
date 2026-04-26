@@ -1,31 +1,27 @@
 """
 PM-10: POST /analyze-room
-Accepts a room image, sends to Claude vision, returns structured palette JSON.
+Accepts a room image, sends to GPT-4o vision, returns structured palette JSON.
 """
 import base64
 import os
 import json
 import io
 
-import anthropic
+from openai import OpenAI
 from flask import Blueprint, request, jsonify
 from PIL import Image
 
 analyze_room_bp = Blueprint("analyze_room", __name__)
 
-_anthropic_client: anthropic.Anthropic | None = None
+_openai_client: OpenAI | None = None
 
 
-def _get_client() -> anthropic.Anthropic:
-    global _anthropic_client
-    if _anthropic_client is None:
-        _anthropic_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    return _anthropic_client
+def _get_client() -> OpenAI:
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    return _openai_client
 
-
-SYSTEM_PROMPT = """You are an expert interior design color consultant.
-Analyze the provided room photo and return ONLY valid JSON (no markdown, no extra text).
-"""
 
 USER_PROMPT = """Analyze this room photo. Return a JSON object with exactly this shape:
 {
@@ -70,25 +66,22 @@ def analyze_room():
     except Exception as e:
         return jsonify({"data": None, "error": f"Could not read image: {e}"}), 400
 
-    mime_type = "image/jpeg"
     image_data = base64.standard_b64encode(raw_bytes).decode("utf-8")
 
     try:
         client = _get_client()
-        message = client.messages.create(
-            model="claude-sonnet-4-6",
+        response = client.chat.completions.create(
+            model="gpt-4o",
             max_tokens=1024,
-            system=SYSTEM_PROMPT,
             messages=[
                 {
                     "role": "user",
                     "content": [
                         {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": mime_type,
-                                "data": image_data,
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_data}",
+                                "detail": "high",
                             },
                         },
                         {"type": "text", "text": USER_PROMPT},
@@ -97,7 +90,7 @@ def analyze_room():
             ],
         )
 
-        raw = message.content[0].text.strip()
+        raw = response.choices[0].message.content.strip()
         # Strip markdown code fences if present
         if raw.startswith("```"):
             raw = raw.split("```")[1]
@@ -107,8 +100,6 @@ def analyze_room():
         return jsonify({"data": result, "error": None})
 
     except json.JSONDecodeError as e:
-        return jsonify({"data": None, "error": f"Failed to parse Claude response: {e}"}), 500
-    except anthropic.APIError as e:
-        return jsonify({"data": None, "error": f"Anthropic API error: {e}"}), 502
+        return jsonify({"data": None, "error": f"Failed to parse GPT-4o response: {e}"}), 500
     except Exception as e:
-        return jsonify({"data": None, "error": str(e)}), 500
+        return jsonify({"data": None, "error": f"OpenAI API error: {e}"}), 502

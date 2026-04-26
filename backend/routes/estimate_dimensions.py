@@ -1,6 +1,6 @@
 """
 POST /api/estimate-dimensions
-Uses Claude Vision to detect all paintable surfaces in a room photo and
+Uses GPT-4o Vision to detect all paintable surfaces in a room photo and
 return structured wall/trim/opening data for accurate paint estimation.
 
 Output schema:
@@ -16,19 +16,19 @@ import json
 import os
 import re
 
-import anthropic
+from openai import OpenAI
 from flask import Blueprint, request, jsonify
 
 estimate_dimensions_bp = Blueprint("estimate_dimensions", __name__)
 
-_anthropic_client: anthropic.Anthropic | None = None
+_openai_client: OpenAI | None = None
 
 
-def _get_client() -> anthropic.Anthropic:
-    global _anthropic_client
-    if _anthropic_client is None:
-        _anthropic_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    return _anthropic_client
+def _get_client() -> OpenAI:
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    return _openai_client
 
 
 SYSTEM_PROMPT = """You are a professional paint estimator analyzing a room photo.
@@ -78,7 +78,7 @@ Rules:
 
 
 def _compute_totals(data: dict) -> dict:
-    """Compute totals object from parsed Claude output."""
+    """Compute totals object from parsed GPT-4o output."""
     wall_area = sum(w.get("width_ft", 0) * w.get("height_ft", 0) for w in data.get("walls", []))
     openings_area = sum(o.get("width_ft", 0) * o.get("height_ft", 0) for o in data.get("openings", []))
     net_wall = max(0.0, wall_area - openings_area)
@@ -146,19 +146,18 @@ def estimate_dimensions():
             image_b64 = image_b64.split(",", 1)[1]
 
         client = _get_client()
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
+        response = client.chat.completions.create(
+            model="gpt-4o",
             max_tokens=1024,
             messages=[
                 {
                     "role": "user",
                     "content": [
                         {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": image_b64,
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_b64}",
+                                "detail": "high",
                             },
                         },
                         {"type": "text", "text": SYSTEM_PROMPT},
@@ -167,7 +166,7 @@ def estimate_dimensions():
             ],
         )
 
-        raw = response.content[0].text.strip()
+        raw = response.choices[0].message.content.strip()
         if raw.startswith("```"):
             raw = re.sub(r"^```[a-z]*\n?", "", raw)
             raw = re.sub(r"\n?```$", "", raw).strip()
