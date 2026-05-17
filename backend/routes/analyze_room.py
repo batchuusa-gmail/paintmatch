@@ -23,25 +23,46 @@ def _get_client() -> OpenAI:
     return _openai_client
 
 
-USER_PROMPT = """Analyze this room photo. Return a JSON object with exactly this shape:
-{
+_BASE_PROMPT = """Analyze this room photo. Return a JSON object with exactly this shape:
+{{
   "wall_hex": "#RRGGBB",
   "room_style": "modern|traditional|farmhouse|scandinavian|bohemian|industrial|coastal|other",
   "lighting": "bright_natural|warm_natural|cool_natural|artificial_warm|artificial_cool|mixed|dim",
   "furniture_palette": ["#RRGGBB"],
   "recommended_palettes": [
-    {
+    {{
       "name": "Palette name",
       "hex": "#RRGGBB",
       "rationale": "One sentence why this color works for this room."
-    }
+    }}
   ]
-}
+}}
 Rules:
-- recommended_palettes must have exactly 3 entries.
+- recommended_palettes must have exactly 3 entries.{style_rule}
 - All hex values must be valid 6-digit hex codes including the #.
 - Return nothing except the JSON object.
 """
+
+_STYLE_DESCRIPTIONS = {
+    "modern":       "clean lines, neutral tones, bold accents",
+    "scandinavian": "whites, soft grays, natural wood tones, minimal palette",
+    "traditional":  "warm creams, rich jewel tones, classic warmth",
+    "farmhouse":    "whites, creams, warm neutrals, rustic warmth",
+    "industrial":   "dark charcoals, steel blues, raw concrete tones",
+    "coastal":      "soft blues, seafoam greens, sandy neutrals, ocean palette",
+}
+
+
+def _build_prompt(style: str | None) -> str:
+    if style:
+        desc = _STYLE_DESCRIPTIONS.get(style.lower(), "")
+        style_rule = (
+            f"\n- The user selected '{style}' style — recommend colors that fit "
+            f"{style} interiors ({desc}). Prioritise this style in all 3 palettes."
+        )
+    else:
+        style_rule = ""
+    return _BASE_PROMPT.format(style_rule=style_rule)
 
 
 @analyze_room_bp.route("/analyze-room", methods=["POST"])
@@ -67,6 +88,8 @@ def analyze_room():
         return jsonify({"data": None, "error": f"Could not read image: {e}"}), 400
 
     image_data = base64.standard_b64encode(raw_bytes).decode("utf-8")
+    style = request.form.get("style")  # optional style hint from user selection
+    prompt = _build_prompt(style)
 
     try:
         client = _get_client()
@@ -84,7 +107,7 @@ def analyze_room():
                                 "detail": "high",
                             },
                         },
-                        {"type": "text", "text": USER_PROMPT},
+                        {"type": "text", "text": prompt},
                     ],
                 }
             ],

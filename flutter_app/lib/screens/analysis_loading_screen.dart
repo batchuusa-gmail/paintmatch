@@ -8,8 +8,9 @@ import '../services/subscription_service.dart';
 
 class AnalysisLoadingScreen extends StatefulWidget {
   final File imageFile;
+  final String? style;
 
-  const AnalysisLoadingScreen({super.key, required this.imageFile});
+  const AnalysisLoadingScreen({super.key, required this.imageFile, this.style});
 
   @override
   State<AnalysisLoadingScreen> createState() => _AnalysisLoadingScreenState();
@@ -27,11 +28,8 @@ class _AnalysisLoadingScreenState extends State<AnalysisLoadingScreen> {
   Future<void> _analyze() async {
     try {
       setState(() => _status = 'Detecting wall colors and room style...');
-      final analysis = await ApiService().analyzeRoom(widget.imageFile);
-      // Deduct one trial analysis on successful completion
+      final analysis = await ApiService().analyzeRoom(widget.imageFile, style: widget.style);
       await SubscriptionService().recordAnalysis();
-
-      setState(() => _status = 'Building color palettes...');
 
       setState(() => _status = 'Building color palettes...');
       await Future.delayed(const Duration(milliseconds: 600));
@@ -45,7 +43,6 @@ class _AnalysisLoadingScreenState extends State<AnalysisLoadingScreen> {
       print('[PaintMatch ERROR] $e');
       print('[PaintMatch STACK] $stack');
       if (!mounted) return;
-      // Show error on screen instead of disappearing snackbar
       setState(() => _status = 'Error: $e');
     }
   }
@@ -60,7 +57,6 @@ class _AnalysisLoadingScreenState extends State<AnalysisLoadingScreen> {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                // Room image thumbnail
                 ClipRRect(
                   borderRadius: BorderRadius.circular(16),
                   child: Shimmer.fromColors(
@@ -83,7 +79,9 @@ class _AnalysisLoadingScreenState extends State<AnalysisLoadingScreen> {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'Claude AI is examining lighting,\nwall surfaces, and room style',
+                  widget.style != null
+                      ? 'Tailoring palette for ${widget.style} style…'
+                      : 'Examining lighting, wall surfaces, and room style',
                   style: TextStyle(color: Colors.grey[500], fontSize: 13),
                   textAlign: TextAlign.center,
                 ),

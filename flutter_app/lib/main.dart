@@ -55,9 +55,15 @@ final GoRouter _router = GoRouter(
       final trialEnded = (state.extra as bool?) ?? false;
       return PaywallScreen(trialEnded: trialEnded);
     }),
-    GoRoute(path: '/loading',    builder: (_, state) {
-      final file = state.extra as dynamic;
-      return AnalysisLoadingScreen(imageFile: file);
+    GoRoute(path: '/loading', builder: (_, state) {
+      final extra = state.extra;
+      if (extra is Map<String, dynamic>) {
+        return AnalysisLoadingScreen(
+          imageFile: extra['imageFile'],
+          style: extra['style'] as String?,
+        );
+      }
+      return AnalysisLoadingScreen(imageFile: extra as dynamic);
     }),
     GoRoute(path: '/palette',    builder: (_, state) {
       final args = state.extra as Map<String, dynamic>;

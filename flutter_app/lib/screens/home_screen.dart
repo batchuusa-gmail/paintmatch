@@ -22,6 +22,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   int _analysesRemaining = kTrialLimit;
   List<UserProject> _recentProjects = [];
+  String? _selectedStyle;
 
   @override
   void initState() {
@@ -174,7 +175,10 @@ class _HomeScreenState extends State<HomeScreen> {
       imageQuality: 70,
     );
     if (picked == null || !context.mounted) return;
-    context.push('/loading', extra: File(picked.path));
+    context.push('/loading', extra: {
+      'imageFile': File(picked.path),
+      'style': _selectedStyle,
+    });
   }
 
   @override
@@ -364,10 +368,15 @@ class _HomeScreenState extends State<HomeScreen> {
                     Wrap(
                       spacing: 8,
                       runSpacing: 8,
-                      children: const [
+                      children: [
                         'Modern', 'Scandinavian', 'Traditional',
                         'Farmhouse', 'Industrial', 'Coastal',
-                      ].map((s) => _StyleChip(label: s)).toList(),
+                      ].map((s) => _StyleChip(
+                        label: s,
+                        selected: _selectedStyle == s,
+                        onTap: () => setState(() =>
+                          _selectedStyle = _selectedStyle == s ? null : s),
+                      )).toList(),
                     ),
 
                     const SizedBox(height: 36),
@@ -512,18 +521,32 @@ class _DarkUploadCard extends StatelessWidget {
 
 class _StyleChip extends StatelessWidget {
   final String label;
-  const _StyleChip({required this.label});
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _StyleChip({required this.label, required this.selected, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      decoration: BoxDecoration(
-        color: AppColors.card,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: AppColors.border),
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: selected ? AppColors.accentDim : AppColors.card,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(
+            color: selected ? AppColors.accent : AppColors.border,
+            width: selected ? 1.5 : 1,
+          ),
+        ),
+        child: Text(label, style: TextStyle(
+          color: selected ? AppColors.accent : AppColors.textSecondary,
+          fontSize: 13,
+          fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+        )),
       ),
-      child: Text(label, style: const TextStyle(color: AppColors.textSecondary, fontSize: 13)),
     );
   }
 }

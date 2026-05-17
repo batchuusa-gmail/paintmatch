@@ -18,12 +18,10 @@ class ApiService {
   // -------------------------------------------------------------------------
   // POST /analyze-room
   // -------------------------------------------------------------------------
-  Future<RoomAnalysis> analyzeRoom(File imageFile) async {
+  Future<RoomAnalysis> analyzeRoom(File imageFile, {String? style}) async {
     final uri = Uri.parse('$_base/analyze-room');
     final request = http.MultipartRequest('POST', uri);
 
-    // Always send as JPEG — reads raw bytes and forces image/jpeg content type
-    // This handles HEIC, HEIF, and other macOS-native formats
     final bytes = await imageFile.readAsBytes();
     request.files.add(http.MultipartFile.fromBytes(
       'image',
@@ -31,6 +29,8 @@ class ApiService {
       filename: 'room.jpg',
       contentType: MediaType.parse('image/jpeg'),
     ));
+
+    if (style != null) request.fields['style'] = style;
 
     print('[API] Sending ${bytes.length} bytes to $_base/analyze-room');
 
