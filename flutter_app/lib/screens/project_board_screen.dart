@@ -116,9 +116,13 @@ class _ProjectBoardScreenState extends State<ProjectBoardScreen> {
       appBar: AppBar(
         backgroundColor: AppColors.background,
         automaticallyImplyLeading: false,
-        title: Text('My Projects',
-            style: GoogleFonts.playfairDisplay(
-                color: AppColors.textPrimary, fontWeight: FontWeight.w600)),
+        title: Row(mainAxisSize: MainAxisSize.min, children: [
+          Image.asset('assets/images/app_logo.png', width: 28, height: 28),
+          const SizedBox(width: 8),
+          Text('My Projects',
+              style: GoogleFonts.playfairDisplay(
+                  color: AppColors.textPrimary, fontWeight: FontWeight.w600)),
+        ]),
         actions: [
           IconButton(
             icon: const Icon(Icons.logout, color: AppColors.textSecondary, size: 20),

@@ -357,8 +357,12 @@ class _RoomPreviewScreenState extends State<RoomPreviewScreen> {
           icon: const Icon(Icons.arrow_back_ios, color: AppColors.textPrimary, size: 18),
           onPressed: () => context.go('/'),
         ),
-        title: Text('Preview',
-            style: GoogleFonts.playfairDisplay(color: AppColors.textPrimary, fontWeight: FontWeight.w600)),
+        title: Row(mainAxisSize: MainAxisSize.min, children: [
+          Image.asset('assets/images/app_logo.png', width: 28, height: 28),
+          const SizedBox(width: 8),
+          Text('Preview',
+              style: GoogleFonts.playfairDisplay(color: AppColors.textPrimary, fontWeight: FontWeight.w600)),
+        ]),
         actions: [
           IconButton(
             icon: const Icon(Icons.share_outlined, color: AppColors.textSecondary),
